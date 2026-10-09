@@ -1,0 +1,19 @@
+# Build outputs
+/bin/
+/dist/
+*.test
+coverage.out
+
+# Runtime data
+/tmp/
+*.db
+*.db-shm
+*.db-wal
+
+# Local configuration
+.env
+.env.local
+
+# Editors and operating systems
+.idea/
+.DS_Store
