@@ -6,7 +6,7 @@ Toolane 负责接收工具任务、限制并发、组织显式依赖、管理执
 
 项目名由 Tool 与 Lane 组合。GitHub 仓库名称：`toolane`。
 
-> 当前处于设计阶段，尚未提供可运行实现。下述能力是开发路线，不代表已经完成。
+> 当前正在开发 V0.1。M0.1 的 Mock 执行闭环已经可运行；Process Executor 与输出限制尚未实现。下述路线中的其他能力也仍是规划。
 
 ## 项目目标
 
@@ -27,6 +27,26 @@ Toolane 负责接收工具任务、限制并发、组织显式依赖、管理执
 
 默认从 **V0.1 / M0.1** 开始：先完成工具注册、Mock Executor、有界队列、Worker、状态查询、取消、超时与 CLI 演示，再接入可信 Process Executor。
 
+## 当前可运行内容
+
+需要 Go 1.27.1。运行本地 Mock 演示：
+
+```bash
+go run ./cmd/toolane
+```
+
+当前可在 Go 进程内注册工具并调用 `Submit`、`Get`、`Cancel` 和 `Close`。Manager 使用固定 Worker、有界 FIFO 队列与一个排队期限监视器；运行取消或超时后，等待 Executor 返回才释放槽位。默认限制为 4 个 Worker、256 个待启动任务、30 秒排队期限、10 秒执行期限、256 KiB 参数、64 KiB 结构化结果，以及保留 1000 个终态记录。请求可在配置上限内调整期限。
+
+运行检查：
+
+```bash
+go test ./...
+go test -race ./...
+go vet ./...
+```
+
+目前只支持 `mock.delay` 演示工具。执行状态和结果仅保存在内存，进程退出后丢失；尚无 Process Executor、Docker、HTTP、DAG 或持久化。
+
 ## 项目边界
 
 本项目不处理 LLM 推理或 Agent Planning。初期采用单机部署，不引入分布式消息队列、Kubernetes 或复杂 Web 平台。
@@ -42,4 +62,4 @@ Process Executor 只运行可信工具；Docker 版本针对常见资源滥用�
 
 **协作 AI 开始工作前须读取上述两份文档与本 README。** 未指定阶段时只开发 V0.1；不要提前实现整条路线。
 
-README 会随实际代码更新运行命令、已实现能力和验证结果。目前不提供安装命令、性能数字或上线声明。
+README 会随实际代码更新运行命令、已实现能力和验证结果。目前不提供性能数字或上线声明。

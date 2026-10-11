@@ -1,0 +1,282 @@
+package execution
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/haonox/toolane/internal/tool"
+)
+
+func testManager(t *testing.T, config Config, execute func(context.Context, json.RawMessage) (json.RawMessage, error)) *Manager {
+	t.Helper()
+	registry := tool.NewRegistry()
+	if err := registry.Register(tool.Definition{
+		Name:     "test",
+		Validate: func(json.RawMessage) error { return nil },
+		Execute:  execute,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := NewManager(config, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := m.Close(ctx); err != nil {
+			t.Errorf("close manager: %v", err)
+		}
+	})
+	return m
+}
+
+func submit(t *testing.T, m *Manager, req Request) Snapshot {
+	t.Helper()
+	if req.Tool == "" {
+		req.Tool = "test"
+	}
+	s, err := m.Submit(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func awaitState(t *testing.T, m *Manager, id string, want State) Snapshot {
+	t.Helper()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for {
+		s, err := m.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.State == want {
+			return s
+		}
+		if s.FinishedAt != nil {
+			t.Fatalf("execution %s reached %s, wanted %s", id, s.State, want)
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatalf("execution %s still %s, wanted %s", id, s.State, want)
+		}
+	}
+}
+
+func TestQueueCapacityTimeoutAndCancel(t *testing.T) {
+	config := DefaultConfig()
+	config.Workers = 1
+	config.QueueCapacity = 1
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	m := testManager(t, config, func(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		return json.RawMessage(`{"ok":true}`), nil
+	})
+	first := submit(t, m, Request{})
+	<-started
+	second := submit(t, m, Request{QueueTimeout: 20 * time.Millisecond})
+	if _, err := m.Submit(context.Background(), Request{Tool: "test"}); !errors.Is(err, ErrQueueFull) {
+		t.Fatalf("full queue error = %v", err)
+	}
+	timedOut := awaitState(t, m, second.ID, TimedOut)
+	if timedOut.ErrorCode != "queue_timeout" || calls.Load() != 1 {
+		t.Fatalf("queued timeout: %+v, calls=%d", timedOut, calls.Load())
+	}
+	third := submit(t, m, Request{})
+	cancelled, err := m.Cancel(third.ID)
+	if err != nil || cancelled.State != Cancelled {
+		t.Fatalf("cancel queued: %+v, %v", cancelled, err)
+	}
+	if stats := m.Stats(); stats.Queued != 0 || stats.Running != 1 {
+		t.Fatalf("capacity after queued cancel: %+v", stats)
+	}
+	close(release)
+	awaitState(t, m, first.ID, Succeeded)
+	if calls.Load() != 1 {
+		t.Fatalf("queued work unexpectedly executed %d times", calls.Load())
+	}
+}
+
+func TestRunningCancellationWinsAndReleasesSlot(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	m := testManager(t, DefaultConfig(), func(context.Context, json.RawMessage) (json.RawMessage, error) {
+		close(started)
+		<-release
+		return json.RawMessage(`{"ok":true}`), nil
+	})
+	s := submit(t, m, Request{})
+	<-started
+	stopping, err := m.Cancel(s.ID)
+	if err != nil || stopping.State != Cancelling || stopping.StopReason != "user_cancelled" {
+		t.Fatalf("cancel running: %+v, %v", stopping, err)
+	}
+	if again, err := m.Cancel(s.ID); err != nil || again.State != Cancelling {
+		t.Fatalf("repeat cancel: %+v, %v", again, err)
+	}
+	close(release)
+	final := awaitState(t, m, s.ID, Cancelled)
+	if final.Result != nil || final.FinishedAt == nil || m.Stats().Running != 0 {
+		t.Fatalf("cancelled execution retained work: %+v, stats=%+v", final, m.Stats())
+	}
+	if again, err := m.Cancel(s.ID); err != nil || again.State != Cancelled {
+		t.Fatalf("cancel terminal: %+v, %v", again, err)
+	}
+}
+
+func TestCompletionWinsBeforeCancellation(t *testing.T) {
+	m := testManager(t, DefaultConfig(), func(context.Context, json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`{"ok":true}`), nil
+	})
+	s := submit(t, m, Request{})
+	awaitState(t, m, s.ID, Succeeded)
+	final, err := m.Cancel(s.ID)
+	if err != nil || final.State != Succeeded {
+		t.Fatalf("cancel after completion: %+v, %v", final, err)
+	}
+	final.Result[0] = 'x'
+	again, _ := m.Get(s.ID)
+	if string(again.Result) != `{"ok":true}` {
+		t.Fatalf("returned snapshot changed stored result: %s", again.Result)
+	}
+	*final.FinishedAt = time.Time{}
+	again, _ = m.Get(s.ID)
+	if again.FinishedAt.IsZero() {
+		t.Fatal("returned snapshot changed stored finish time")
+	}
+}
+
+func TestExecutionTimeout(t *testing.T) {
+	m := testManager(t, DefaultConfig(), func(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	s := submit(t, m, Request{ExecutionTimeout: 20 * time.Millisecond})
+	final := awaitState(t, m, s.ID, TimedOut)
+	if final.ErrorCode != "execution_timeout" || final.StopReason != "execution_timeout" || m.Stats().Running != 0 {
+		t.Fatalf("execution timeout: %+v, stats=%+v", final, m.Stats())
+	}
+}
+
+func TestSubmitContextDoesNotOwnAcceptedWork(t *testing.T) {
+	m := testManager(t, DefaultConfig(), func(context.Context, json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`{"ok":true}`), nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	s, err := m.Submit(ctx, Request{Tool: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	awaitState(t, m, s.ID, Succeeded)
+}
+
+func TestCloseCancelsAndDrains(t *testing.T) {
+	config := DefaultConfig()
+	config.Workers = 1
+	started := make(chan struct{})
+	m := testManager(t, config, func(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	first := submit(t, m, Request{})
+	<-started
+	second := submit(t, m, Request{})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := m.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{first.ID, second.ID} {
+		if s, err := m.Get(id); err != nil || s.State != Cancelled {
+			t.Fatalf("closed execution %s: %+v, %v", id, s, err)
+		}
+	}
+	if stats := m.Stats(); stats.Running != 0 || stats.Queued != 0 {
+		t.Fatalf("close left active work: %+v", stats)
+	}
+	if _, err := m.Submit(context.Background(), Request{Tool: "test"}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("submit after close = %v", err)
+	}
+}
+
+func TestAdmissionAndResultLimits(t *testing.T) {
+	config := DefaultConfig()
+	config.MaxArgumentBytes = 3
+	config.MaxResultBytes = 5
+	m := testManager(t, config, func(context.Context, json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`{"large":true}`), nil
+	})
+	if _, err := m.Submit(context.Background(), Request{Tool: "test", Arguments: json.RawMessage(`"long"`)}); !errors.Is(err, ErrArgumentsTooLarge) {
+		t.Fatalf("oversized arguments: %v", err)
+	}
+	if _, err := m.Submit(context.Background(), Request{Tool: "missing"}); err == nil {
+		t.Fatal("unknown tool was accepted")
+	}
+	if _, err := m.Submit(context.Background(), Request{Tool: "test", ExecutionTimeout: config.MaxRunTimeout + time.Second}); err == nil {
+		t.Fatal("excessive execution timeout was accepted")
+	}
+	if stats := m.Stats(); stats.Stored != 0 {
+		t.Fatalf("invalid requests created records: %+v", stats)
+	}
+	s := submit(t, m, Request{})
+	final := awaitState(t, m, s.ID, Failed)
+	if final.ErrorCode != "result_limit_exceeded" || len(final.Result) != 0 {
+		t.Fatalf("oversized result: %+v", final)
+	}
+}
+
+func TestTerminalRetention(t *testing.T) {
+	config := DefaultConfig()
+	config.RetainedResults = 1
+	m := testManager(t, config, func(context.Context, json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`{"ok":true}`), nil
+	})
+	first := submit(t, m, Request{})
+	awaitState(t, m, first.ID, Succeeded)
+	second := submit(t, m, Request{})
+	awaitState(t, m, second.ID, Succeeded)
+	if _, err := m.Get(first.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("oldest terminal record still retained: %v", err)
+	}
+	if stats := m.Stats(); stats.Stored != 1 {
+		t.Fatalf("terminal retention exceeded: %+v", stats)
+	}
+}
+
+func TestExecutorSuccessWithoutResultAndFailure(t *testing.T) {
+	var calls atomic.Int32
+	m := testManager(t, DefaultConfig(), func(context.Context, json.RawMessage) (json.RawMessage, error) {
+		if calls.Add(1) == 1 {
+			return nil, nil
+		}
+		return nil, errors.New("mock failed")
+	})
+	first := submit(t, m, Request{})
+	if final := awaitState(t, m, first.ID, Succeeded); final.Result != nil {
+		t.Fatalf("unexpected result: %s", final.Result)
+	}
+	second := submit(t, m, Request{})
+	if final := awaitState(t, m, second.ID, Failed); final.ErrorCode != "execution_failed" {
+		t.Fatalf("wrong executor error: %+v", final)
+	}
+}
