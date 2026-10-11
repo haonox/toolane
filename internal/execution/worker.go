@@ -3,8 +3,12 @@ package execution
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/haonox/toolane/internal/tool"
 )
 
 func (m *Manager) worker() {
@@ -14,8 +18,15 @@ func (m *Manager) worker() {
 		if !ok {
 			return
 		}
-		result, err := runTool(ctx, m.tools[r.snapshot.Tool].Execute, r.arguments)
-		m.complete(r, ctx, result, err)
+		options := tool.RunOptions{
+			MaxOutputBytes:   r.snapshot.OutputLimitBytes,
+			OnOutputLimit:    func() { m.outputLimitReached(r) },
+			OnProcessStarted: func(at time.Time) { m.processStarted(r, at) },
+		}
+		outcome, err := runTool(ctx, m.tools[r.snapshot.Tool].Execute, r.arguments, options)
+		if !m.complete(r, ctx, outcome, err) {
+			return
+		}
 	}
 }
 
@@ -25,6 +36,10 @@ func (m *Manager) claim() (*record, context.Context, bool) {
 	for {
 		if m.closing {
 			return nil, nil, false
+		}
+		if m.halted {
+			m.cond.Wait()
+			continue
 		}
 		if len(m.queue) == 0 {
 			m.cond.Wait()
@@ -57,14 +72,14 @@ func (m *Manager) claim() (*record, context.Context, bool) {
 	}
 }
 
-func runTool(ctx context.Context, execute func(context.Context, json.RawMessage) (json.RawMessage, error), args json.RawMessage) (result json.RawMessage, err error) {
+func runTool(ctx context.Context, execute func(context.Context, json.RawMessage, tool.RunOptions) (tool.Outcome, error), args json.RawMessage, options tool.RunOptions) (outcome tool.Outcome, err error) {
 	defer func() {
 		if value := recover(); value != nil {
-			result = nil
+			outcome = tool.Outcome{}
 			err = fmt.Errorf("tool panic: %v", value)
 		}
 	}()
-	return execute(ctx, args)
+	return execute(ctx, args, options)
 }
 
 func (m *Manager) timeoutRunning(r *record) {
@@ -76,32 +91,97 @@ func (m *Manager) timeoutRunning(r *record) {
 	}
 }
 
-func (m *Manager) complete(r *record, ctx context.Context, result json.RawMessage, err error) {
+func (m *Manager) outputLimitReached(r *record) {
+	m.mu.Lock()
+	var cancel context.CancelFunc
+	if r.snapshot.State == Running {
+		r.snapshot.State = Cancelling
+		r.snapshot.StopReason = "output_limit_exceeded"
+		cancel = r.cancel
+	}
+	m.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (m *Manager) processStarted(r *record, at time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if r.snapshot.State == Running || r.snapshot.State == Cancelling {
+		at = at.UTC()
+		r.snapshot.ProcessStartedAt = &at
+	}
+}
+
+func (m *Manager) complete(r *record, ctx context.Context, outcome tool.Outcome, err error) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	defer r.cancel()
+	if outcome.ProcessStartedAt != nil {
+		r.snapshot.ProcessStartedAt = outcome.ProcessStartedAt
+	}
+	r.snapshot.ExitCode = outcome.ExitCode
+	r.snapshot.OutputTruncated = outcome.OutputTruncated
+	stdout, stderr := []byte(outcome.Stdout), []byte(outcome.Stderr)
+	limit := r.snapshot.OutputLimitBytes
+	if len(stdout) > limit {
+		stdout = stdout[:limit]
+		r.snapshot.OutputTruncated = true
+	}
+	if len(stderr) > limit-len(stdout) {
+		stderr = stderr[:limit-len(stdout)]
+		r.snapshot.OutputTruncated = true
+	}
+	r.snapshot.Stdout = strings.ToValidUTF8(string(stdout), "?")
+	r.snapshot.Stderr = strings.ToValidUTF8(string(stderr), "?")
+	if outcome.StopUnconfirmed {
+		if r.snapshot.State == Running {
+			r.snapshot.State = Cancelling
+			r.snapshot.StopReason = "stop_unconfirmed"
+		}
+		r.snapshot.CleanupStatus = "failed"
+		if err != nil {
+			r.snapshot.ErrorMessage = err.Error()
+		}
+		m.halted = true
+		m.cond.Broadcast()
+		return false
+	}
 	if r.snapshot.State == Running && ctx.Err() == context.DeadlineExceeded {
 		r.snapshot.State = Cancelling
 		r.snapshot.StopReason = "execution_timeout"
+	}
+	if r.snapshot.State == Running && r.snapshot.OutputTruncated {
+		r.snapshot.State = Cancelling
+		r.snapshot.StopReason = "output_limit_exceeded"
 	}
 	if r.snapshot.State == Cancelling {
 		switch r.snapshot.StopReason {
 		case "execution_timeout":
 			m.finishLocked(r, TimedOut, "execution_timeout", "execution deadline expired")
+		case "output_limit_exceeded":
+			m.finishLocked(r, Failed, "output_limit_exceeded", "combined stdout and stderr exceeded limit")
 		default:
 			m.finishLocked(r, Cancelled, "cancelled", "execution stopped")
 		}
 	} else if err != nil {
-		m.finishLocked(r, Failed, "execution_failed", err.Error())
-	} else if len(result) > m.config.MaxResultBytes {
+		code := "execution_failed"
+		var runErr *tool.RunError
+		if errors.As(err, &runErr) && runErr != nil && runErr.Code != "" {
+			code = runErr.Code
+		}
+		m.finishLocked(r, Failed, code, err.Error())
+	} else if len(outcome.Result) > m.config.MaxResultBytes {
 		m.finishLocked(r, Failed, "result_limit_exceeded", "structured result exceeds limit")
-	} else if len(result) > 0 && !json.Valid(result) {
+	} else if len(outcome.Result) > 0 && !json.Valid(outcome.Result) {
 		m.finishLocked(r, Failed, "invalid_result", "executor returned invalid JSON")
 	} else {
-		r.snapshot.Result = append(json.RawMessage(nil), result...)
+		r.snapshot.Result = append(json.RawMessage(nil), outcome.Result...)
 		m.finishLocked(r, Succeeded, "", "")
 	}
 	m.running--
+	return true
 }
 
 // expireQueued uses one timer for all accepted queue deadlines. Expired work

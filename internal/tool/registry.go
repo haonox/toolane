@@ -6,14 +6,57 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
+
+// RunOptions are effective limits owned by the manager. OnOutputLimit must be
+// called synchronously when the shared output budget is reached.
+type RunOptions struct {
+	MaxOutputBytes   int
+	OnOutputLimit    func()
+	OnProcessStarted func(time.Time)
+}
+
+// Outcome contains executor facts. The manager alone decides the final state.
+type Outcome struct {
+	Result           json.RawMessage
+	Stdout           string
+	Stderr           string
+	ExitCode         *int
+	OutputTruncated  bool
+	ProcessStartedAt *time.Time
+	StopUnconfirmed  bool
+}
+
+// RunError gives a stable code for an executor failure without making the
+// manager depend on a particular backend package.
+type RunError struct {
+	Code string
+	Err  error
+}
+
+func (e *RunError) Error() string {
+	if e == nil {
+		return "execution error"
+	}
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return e.Code
+}
+func (e *RunError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
 
 // Definition is a server-owned tool. Validate runs before admission; Execute
 // must return only after its work has stopped when its context is cancelled.
 type Definition struct {
 	Name     string
 	Validate func(json.RawMessage) error
-	Execute  func(context.Context, json.RawMessage) (json.RawMessage, error)
+	Execute  func(context.Context, json.RawMessage, RunOptions) (Outcome, error)
 }
 
 // Registry stores explicit tool registrations. A Manager takes a snapshot of

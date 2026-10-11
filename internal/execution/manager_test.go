@@ -17,7 +17,10 @@ func testManager(t *testing.T, config Config, execute func(context.Context, json
 	if err := registry.Register(tool.Definition{
 		Name:     "test",
 		Validate: func(json.RawMessage) error { return nil },
-		Execute:  execute,
+		Execute: func(ctx context.Context, args json.RawMessage, _ tool.RunOptions) (tool.Outcome, error) {
+			result, err := execute(ctx, args)
+			return tool.Outcome{Result: result}, err
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -278,5 +281,111 @@ func TestExecutorSuccessWithoutResultAndFailure(t *testing.T) {
 	second := submit(t, m, Request{})
 	if final := awaitState(t, m, second.ID, Failed); final.ErrorCode != "execution_failed" {
 		t.Fatalf("wrong executor error: %+v", final)
+	}
+}
+
+func TestOutputLimitAndUserCancelKeepFirstStopReason(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		limitFirst bool
+		want       State
+		wantReason string
+	}{
+		{name: "output first", limitFirst: true, want: Failed, wantReason: "output_limit_exceeded"},
+		{name: "cancel first", limitFirst: false, want: Cancelled, wantReason: "user_cancelled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			started := make(chan struct{})
+			limitCommitted := make(chan struct{})
+			registry := tool.NewRegistry()
+			if err := registry.Register(tool.Definition{
+				Name:     "output",
+				Validate: func(json.RawMessage) error { return nil },
+				Execute: func(ctx context.Context, _ json.RawMessage, opts tool.RunOptions) (tool.Outcome, error) {
+					close(started)
+					if tc.limitFirst {
+						opts.OnOutputLimit()
+						close(limitCommitted)
+						<-ctx.Done()
+					} else {
+						<-ctx.Done()
+						opts.OnOutputLimit()
+						close(limitCommitted)
+					}
+					return tool.Outcome{Stdout: "1234", OutputTruncated: true}, ctx.Err()
+				},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			m, err := NewManager(DefaultConfig(), registry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := m.Close(context.Background()); err != nil {
+					t.Errorf("close: %v", err)
+				}
+			})
+			s := submit(t, m, Request{Tool: "output"})
+			<-started
+			if tc.limitFirst {
+				<-limitCommitted
+			}
+			_, err = m.Cancel(s.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			<-limitCommitted
+			final := awaitState(t, m, s.ID, tc.want)
+			if final.StopReason != tc.wantReason || !final.OutputTruncated || m.Stats().Running != 0 {
+				t.Fatalf("stop ordering: %+v, stats=%+v", final, m.Stats())
+			}
+		})
+	}
+}
+
+func TestUnconfirmedStopKeepsReservationAndHaltsAdmission(t *testing.T) {
+	registry := tool.NewRegistry()
+	if err := registry.Register(tool.Definition{
+		Name:     "uncertain",
+		Validate: func(json.RawMessage) error { return nil },
+		Execute: func(context.Context, json.RawMessage, tool.RunOptions) (tool.Outcome, error) {
+			return tool.Outcome{StopUnconfirmed: true}, errors.New("group stop failed")
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	config := DefaultConfig()
+	config.Workers = 1
+	m, err := NewManager(config, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := submit(t, m, Request{Tool: "uncertain"})
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for !m.Stats().Halted {
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatal("manager did not halt after unconfirmed stop")
+		}
+	}
+	active, err := m.Get(s.ID)
+	if err != nil || active.State != Cancelling || active.FinishedAt != nil || active.CleanupStatus != "failed" {
+		t.Fatalf("unconfirmed record: %+v, %v", active, err)
+	}
+	if stats := m.Stats(); stats.Running != 1 || !stats.Halted {
+		t.Fatalf("unconfirmed reservation was released: %+v", stats)
+	}
+	if _, err := m.Submit(context.Background(), Request{Tool: "uncertain"}); !errors.Is(err, ErrBackendUnavailable) {
+		t.Fatalf("new work admitted after backend halt: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := m.Close(ctx); !errors.Is(err, ErrStopUnconfirmed) {
+		t.Fatalf("close with unresolved process = %v", err)
 	}
 }

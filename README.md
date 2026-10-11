@@ -6,7 +6,7 @@ Toolane 负责接收工具任务、限制并发、组织显式依赖、管理执
 
 项目名由 Tool 与 Lane 组合。GitHub 仓库名称：`toolane`。
 
-> 当前正在开发 V0.1。M0.1 的 Mock 执行闭环已经可运行；Process Executor 与输出限制尚未实现。下述路线中的其他能力也仍是规划。
+> 当前正在开发 V0.1。Mock 执行闭环和可信 Process Executor 已可运行；阶段验收仍在进行。下述路线中的其他能力仍是规划。
 
 ## 项目目标
 
@@ -29,13 +29,16 @@ Toolane 负责接收工具任务、限制并发、组织显式依赖、管理执
 
 ## 当前可运行内容
 
-需要 Go 1.27.1。运行本地 Mock 演示：
+需要 Go 1.27.1。运行本地 Mock 或可信进程演示：
 
 ```bash
 go run ./cmd/toolane
+go run ./cmd/toolane process
 ```
 
-当前可在 Go 进程内注册工具并调用 `Submit`、`Get`、`Cancel` 和 `Close`。Manager 使用固定 Worker、有界 FIFO 队列与一个排队期限监视器；运行取消或超时后，等待 Executor 返回才释放槽位。默认限制为 4 个 Worker、256 个待启动任务、30 秒排队期限、10 秒执行期限、256 KiB 参数、64 KiB 结构化结果，以及保留 1000 个终态记录。请求可在配置上限内调整期限。
+当前可在 Go 进程内注册工具并调用 `Submit`、`Get`、`Cancel` 和 `Close`。Manager 使用固定 Worker、有界 FIFO 队列与一个排队期限监视器；运行取消或超时后，等待 Executor 返回才释放槽位。默认限制为 4 个 Worker、256 个待启动任务、30 秒排队期限、10 秒执行期限、256 KiB 参数、64 KiB 结构化结果、stdout/stderr 共享 1 MiB 原始字节预算，以及保留 1000 个终态记录。请求可在配置上限内收紧期限和输出预算。
+
+Process Executor 只运行服务端显式注册且标为可信的绝对路径程序，用参数数组启动，不调用 Shell。Linux 下为进程建立独立进程组；取消、超时或输出达到上限时先发送 SIGTERM，宽限期后发送 SIGKILL，并限制等待继承管道的时间。若进程组停止无法确认，Manager 保留运行预留、暂停新任务准入并报告关闭错误。这个机制仅适用于可信程序，不是安全沙箱。CLI 的 `process` 演示运行系统 `printf`；没有任意命令执行入口。
 
 运行检查：
 
@@ -45,7 +48,7 @@ go test -race ./...
 go vet ./...
 ```
 
-目前只支持 `mock.delay` 演示工具。执行状态和结果仅保存在内存，进程退出后丢失；尚无 Process Executor、Docker、HTTP、DAG 或持久化。
+演示提供 `mock.delay` 与 `process.printf`；调用方也可在服务端注册其他可信工具。执行状态和结果仅保存在内存，进程退出后丢失；尚无 Docker、HTTP、DAG 或持久化。Process Executor 与真实进程测试以 Linux 为目标；其他平台会返回 `process_unsupported`。
 
 ## 项目边界
 

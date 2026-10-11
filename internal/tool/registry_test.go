@@ -11,7 +11,7 @@ func TestRegistryRejectsDuplicateAndReturnsSnapshot(t *testing.T) {
 	def := Definition{
 		Name:     "sample",
 		Validate: func(json.RawMessage) error { return nil },
-		Execute:  func(context.Context, json.RawMessage) (json.RawMessage, error) { return nil, nil },
+		Execute:  func(context.Context, json.RawMessage, RunOptions) (Outcome, error) { return Outcome{}, nil },
 	}
 	if err := r.Register(def); err != nil {
 		t.Fatal(err)
