@@ -248,6 +248,141 @@ func TestAdmissionAndResultLimits(t *testing.T) {
 	}
 }
 
+func TestToolPolicyNarrowsAdmissionDefaultsAndResult(t *testing.T) {
+	registry := tool.NewRegistry()
+	observedOutput := make(chan int, 2)
+	for _, def := range []tool.Definition{
+		{
+			Name: "strict",
+			Policy: tool.Policy{
+				DefaultQueueTimeout: 100 * time.Millisecond,
+				MaxQueueTimeout:     250 * time.Millisecond,
+				DefaultRunTimeout:   200 * time.Millisecond,
+				MaxRunTimeout:       500 * time.Millisecond,
+				DefaultOutputBytes:  4,
+				MaxOutputBytes:      8,
+				MaxArgumentBytes:    8,
+				MaxResultBytes:      5,
+			},
+			Validate: func(json.RawMessage) error { return nil },
+			Execute: func(_ context.Context, _ json.RawMessage, options tool.RunOptions) (tool.Outcome, error) {
+				observedOutput <- options.MaxOutputBytes
+				return tool.Outcome{Result: json.RawMessage(`{"v":1}`)}, nil
+			},
+		},
+		{
+			Name:     "inherited",
+			Validate: func(json.RawMessage) error { return nil },
+			Execute: func(context.Context, json.RawMessage, tool.RunOptions) (tool.Outcome, error) {
+				return tool.Outcome{Result: json.RawMessage(`{"ok":true}`)}, nil
+			},
+		},
+	} {
+		if err := registry.Register(def); err != nil {
+			t.Fatal(err)
+		}
+	}
+	config := DefaultConfig()
+	m, err := NewManager(config, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := m.Close(context.Background()); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	})
+	for _, req := range []Request{
+		{Tool: "strict", QueueTimeout: 300 * time.Millisecond},
+		{Tool: "strict", ExecutionTimeout: time.Second},
+		{Tool: "strict", OutputLimitBytes: 9},
+		{Tool: "strict", Arguments: json.RawMessage(`"too long"`)},
+	} {
+		if _, err := m.Submit(context.Background(), req); err == nil {
+			t.Fatalf("tool limit bypassed by %+v", req)
+		}
+	}
+	if stats := m.Stats(); stats.Stored != 0 {
+		t.Fatalf("rejected requests created records: %+v", stats)
+	}
+	strict := submit(t, m, Request{Tool: "strict"})
+	if strict.QueueTimeout != 100*time.Millisecond || strict.ExecutionTimeout != 200*time.Millisecond ||
+		strict.OutputLimitBytes != 4 || strict.ArgumentLimitBytes != 8 || strict.ResultLimitBytes != 5 {
+		t.Fatalf("wrong effective strict policy: %+v", strict)
+	}
+	if final := awaitState(t, m, strict.ID, Failed); final.ErrorCode != "result_limit_exceeded" {
+		t.Fatalf("tool result limit not applied: %+v", final)
+	}
+	if got := <-observedOutput; got != 4 {
+		t.Fatalf("executor output budget = %d, want 4", got)
+	}
+	overridden := submit(t, m, Request{Tool: "strict", QueueTimeout: 150 * time.Millisecond, ExecutionTimeout: 300 * time.Millisecond, OutputLimitBytes: 7})
+	if overridden.QueueTimeout != 150*time.Millisecond || overridden.ExecutionTimeout != 300*time.Millisecond || overridden.OutputLimitBytes != 7 {
+		t.Fatalf("allowed override not recorded: %+v", overridden)
+	}
+	awaitState(t, m, overridden.ID, Failed)
+	if got := <-observedOutput; got != 7 {
+		t.Fatalf("executor output budget = %d, want 7", got)
+	}
+	inherited := submit(t, m, Request{Tool: "inherited"})
+	if inherited.QueueTimeout != config.DefaultQueueTimeout || inherited.ExecutionTimeout != config.DefaultRunTimeout ||
+		inherited.OutputLimitBytes != config.MaxOutputBytes || inherited.ArgumentLimitBytes != config.MaxArgumentBytes || inherited.ResultLimitBytes != config.MaxResultBytes {
+		t.Fatalf("global defaults not inherited: %+v", inherited)
+	}
+	awaitState(t, m, inherited.ID, Succeeded)
+}
+
+func TestToolPolicyClipsInheritedDefaultsAndRejectsGlobalOverrun(t *testing.T) {
+	definition := func(policy tool.Policy) tool.Definition {
+		return tool.Definition{
+			Name:     "sample",
+			Policy:   policy,
+			Validate: func(json.RawMessage) error { return nil },
+			Execute: func(context.Context, json.RawMessage, tool.RunOptions) (tool.Outcome, error) {
+				return tool.Outcome{}, nil
+			},
+		}
+	}
+	config := DefaultConfig()
+	for _, policy := range []tool.Policy{
+		{MaxQueueTimeout: config.MaxQueueTimeout + time.Second},
+		{DefaultRunTimeout: config.MaxRunTimeout + time.Second},
+		{MaxOutputBytes: config.MaxOutputBytes + 1},
+		{MaxArgumentBytes: config.MaxArgumentBytes + 1},
+		{MaxResultBytes: config.MaxResultBytes + 1},
+	} {
+		registry := tool.NewRegistry()
+		if err := registry.Register(definition(policy)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewManager(config, registry); err == nil {
+			t.Fatalf("policy above global limit accepted: %+v", policy)
+		}
+	}
+	registry := tool.NewRegistry()
+	if err := registry.Register(definition(tool.Policy{
+		MaxQueueTimeout: time.Second,
+		MaxRunTimeout:   time.Second,
+		MaxOutputBytes:  16,
+	})); err != nil {
+		t.Fatal(err)
+	}
+	m, err := NewManager(config, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := m.Close(context.Background()); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	})
+	s := submit(t, m, Request{Tool: "sample"})
+	if s.QueueTimeout != time.Second || s.ExecutionTimeout != time.Second || s.OutputLimitBytes != 16 {
+		t.Fatalf("inherited defaults did not fit tool maximum: %+v", s)
+	}
+	awaitState(t, m, s.ID, Succeeded)
+}
+
 func TestTerminalRetention(t *testing.T) {
 	config := DefaultConfig()
 	config.RetainedResults = 1

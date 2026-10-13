@@ -172,7 +172,7 @@ func (m *Manager) complete(r *record, ctx context.Context, outcome tool.Outcome,
 			code = runErr.Code
 		}
 		m.finishLocked(r, Failed, code, err.Error())
-	} else if len(outcome.Result) > m.config.MaxResultBytes {
+	} else if len(outcome.Result) > r.snapshot.ResultLimitBytes {
 		m.finishLocked(r, Failed, "result_limit_exceeded", "structured result exceeds limit")
 	} else if len(outcome.Result) > 0 && !json.Valid(outcome.Result) {
 		m.finishLocked(r, Failed, "invalid_result", "executor returned invalid JSON")
