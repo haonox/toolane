@@ -6,7 +6,7 @@ Toolane 负责接收工具任务、限制并发、组织显式依赖、管理执
 
 项目名由 Tool 与 Lane 组合。GitHub 仓库名称：`toolane`。
 
-> 当前正在开发 V0.1。Mock 执行闭环和可信 Process Executor 已可运行；阶段验收仍在进行。下述路线中的其他能力仍是规划。
+> V0.1 的单机闭环已可运行，Linux 自动化验收已覆盖 ACC-01～07；阶段确认仍待审查。下述路线中的其他能力仍是规划。
 
 ## 项目目标
 
@@ -36,7 +36,7 @@ go run ./cmd/toolane
 go run ./cmd/toolane process
 ```
 
-当前可在 Go 进程内注册工具并调用 `Submit`、`Get`、`Cancel` 和 `Close`。Manager 使用固定 Worker、有界 FIFO 队列与一个排队期限监视器；运行取消或超时后，等待 Executor 返回才释放槽位。默认限制为 4 个 Worker、256 个待启动任务、30 秒排队期限、10 秒执行期限、256 KiB 参数、64 KiB 结构化结果、stdout/stderr 共享 1 MiB 原始字节预算，以及保留 1000 个终态记录。请求可在配置上限内收紧期限和输出预算。
+当前可在 Go 进程内注册工具并调用 `Submit`、`Get`、`Cancel` 和 `Close`。Manager 使用固定 Worker、有界 FIFO 队列与一个排队期限监视器；运行取消或超时后，等待 Executor 返回才释放槽位。默认限制为 4 个 Worker、256 个待启动任务、30 秒排队期限、10 秒执行期限、256 KiB 参数、64 KiB 结构化结果、stdout/stderr 共享 1 MiB 原始字节预算、256 字节 Agent ID、4 KiB 错误摘要，以及保留 1000 个终态记录。请求可在配置上限内收紧期限和输出预算。
 
 注册工具时可在 `tool.Definition.Policy` 中设置更严格的排队与执行期限、输出预算、参数大小和结果大小。策略字段为零时沿用 Manager 的全局配置；若工具最大值低于全局默认值，未指定的工具默认值会收紧到该最大值。超出全局上限的工具策略会在 Manager 启动前被拒绝；任务记录保存实际采用的期限与预算。
 
@@ -64,6 +64,7 @@ Process Executor 只运行可信工具；Docker 版本针对常见资源滥用�
 | --- | --- |
 | [REQUIREMENTS.md](./REQUIREMENTS.md) | 项目范围、版本计划、执行语义、默认限额与验收条件 |
 | [DEVELOPMENT.md](./DEVELOPMENT.md) | Go 风格、模块边界、测试要求与 AI 协作流程 |
+| [docs/V0.1-ACCEPTANCE.md](./docs/V0.1-ACCEPTANCE.md) | V0.1 自动化验收范围、命令与限制 |
 
 **协作 AI 开始工作前须读取上述两份文档与本 README。** 未指定阶段时只开发 V0.1；不要提前实现整条路线。
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -485,13 +486,14 @@ func TestUnconfirmedStopKeepsReservationAndHaltsAdmission(t *testing.T) {
 		Name:     "uncertain",
 		Validate: func(json.RawMessage) error { return nil },
 		Execute: func(context.Context, json.RawMessage, tool.RunOptions) (tool.Outcome, error) {
-			return tool.Outcome{StopUnconfirmed: true}, errors.New("group stop failed")
+			return tool.Outcome{StopUnconfirmed: true}, errors.New(strings.Repeat("x", 1024))
 		},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	config := DefaultConfig()
 	config.Workers = 1
+	config.MaxErrorMessageBytes = 32
 	m, err := NewManager(config, registry)
 	if err != nil {
 		t.Fatal(err)
@@ -509,7 +511,7 @@ func TestUnconfirmedStopKeepsReservationAndHaltsAdmission(t *testing.T) {
 		}
 	}
 	active, err := m.Get(s.ID)
-	if err != nil || active.State != Cancelling || active.FinishedAt != nil || active.CleanupStatus != "failed" {
+	if err != nil || active.State != Cancelling || active.FinishedAt != nil || active.CleanupStatus != "failed" || len(active.ErrorMessage) != 32 {
 		t.Fatalf("unconfirmed record: %+v, %v", active, err)
 	}
 	if stats := m.Stats(); stats.Running != 1 || !stats.Halted {
