@@ -42,26 +42,26 @@ func validate(raw json.RawMessage) error {
 	return err
 }
 
-func execute(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+func execute(ctx context.Context, raw json.RawMessage, _ tool.RunOptions) (tool.Outcome, error) {
 	args, err := decode(raw)
 	if err != nil {
-		return nil, err
+		return tool.Outcome{}, err
 	}
 	timer := time.NewTimer(time.Duration(args.DelayMS) * time.Millisecond)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return tool.Outcome{}, ctx.Err()
 	case <-timer.C:
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return tool.Outcome{}, err
 	}
 	if args.Fail {
-		return nil, errors.New("mock requested failure")
+		return tool.Outcome{}, errors.New("mock requested failure")
 	}
 	result, err := json.Marshal(struct {
 		Value string `json:"value"`
 	}{Value: args.Value})
-	return result, err
+	return tool.Outcome{Result: result}, err
 }

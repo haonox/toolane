@@ -15,10 +15,12 @@ import (
 )
 
 var (
-	ErrNotFound          = errors.New("execution not found")
-	ErrQueueFull         = errors.New("execution queue full")
-	ErrClosed            = errors.New("execution manager closed")
-	ErrArgumentsTooLarge = errors.New("tool arguments exceed limit")
+	ErrNotFound           = errors.New("execution not found")
+	ErrQueueFull          = errors.New("execution queue full")
+	ErrClosed             = errors.New("execution manager closed")
+	ErrArgumentsTooLarge  = errors.New("tool arguments exceed limit")
+	ErrBackendUnavailable = errors.New("execution backend unavailable")
+	ErrStopUnconfirmed    = errors.New("execution stop could not be confirmed")
 )
 
 // State describes the public execution lifecycle.
@@ -46,6 +48,7 @@ type Config struct {
 	MaxRunTimeout       time.Duration
 	MaxResultBytes      int
 	MaxArgumentBytes    int
+	MaxOutputBytes      int
 }
 
 func DefaultConfig() Config {
@@ -59,11 +62,12 @@ func DefaultConfig() Config {
 		MaxRunTimeout:       60 * time.Second,
 		MaxResultBytes:      64 * 1024,
 		MaxArgumentBytes:    256 * 1024,
+		MaxOutputBytes:      1024 * 1024,
 	}
 }
 
 func (c Config) validate() error {
-	if c.Workers <= 0 || c.QueueCapacity <= 0 || c.RetainedResults <= 0 || c.MaxResultBytes <= 0 || c.MaxArgumentBytes <= 0 {
+	if c.Workers <= 0 || c.QueueCapacity <= 0 || c.RetainedResults <= 0 || c.MaxResultBytes <= 0 || c.MaxArgumentBytes <= 0 || c.MaxOutputBytes <= 0 {
 		return errors.New("workers, queue capacity, retained results and byte limits must be positive")
 	}
 	if c.DefaultQueueTimeout <= 0 || c.MaxQueueTimeout < c.DefaultQueueTimeout ||
@@ -81,6 +85,7 @@ type Request struct {
 	Arguments        json.RawMessage
 	QueueTimeout     time.Duration
 	ExecutionTimeout time.Duration
+	OutputLimitBytes int
 }
 
 // Snapshot is an immutable view of an execution at one point in time.
@@ -95,12 +100,18 @@ type Snapshot struct {
 	StopReason       string          `json:"stop_reason,omitempty"`
 	CleanupStatus    string          `json:"cleanup_status"`
 	Result           json.RawMessage `json:"result,omitempty"`
+	Stdout           string          `json:"stdout,omitempty"`
+	Stderr           string          `json:"stderr,omitempty"`
+	ExitCode         *int            `json:"exit_code,omitempty"`
+	OutputTruncated  bool            `json:"output_truncated"`
 	CreatedAt        time.Time       `json:"created_at"`
 	ReadyAt          time.Time       `json:"ready_at"`
 	RunningAt        *time.Time      `json:"running_at,omitempty"`
 	FinishedAt       *time.Time      `json:"finished_at,omitempty"`
+	ProcessStartedAt *time.Time      `json:"process_started_at,omitempty"`
 	QueueTimeout     time.Duration   `json:"-"`
 	ExecutionTimeout time.Duration   `json:"-"`
+	OutputLimitBytes int             `json:"-"`
 }
 
 type record struct {
@@ -115,6 +126,7 @@ type Stats struct {
 	Queued  int
 	Running int
 	Stored  int
+	Halted  bool
 }
 
 // Manager owns state changes, the FIFO queue, worker slots and cancellations.
@@ -130,6 +142,7 @@ type Manager struct {
 	terminal []string
 	running  int
 	closing  bool
+	halted   bool
 	expiry   chan struct{}
 	stop     chan struct{}
 	done     chan struct{}
@@ -184,6 +197,13 @@ func (m *Manager) Submit(ctx context.Context, req Request) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("execution timeout: %w", err)
 	}
+	outputLimit := req.OutputLimitBytes
+	if outputLimit < 0 || outputLimit > m.config.MaxOutputBytes {
+		return Snapshot{}, errors.New("output limit outside allowed range")
+	}
+	if outputLimit == 0 {
+		outputLimit = m.config.MaxOutputBytes
+	}
 	arguments := append(json.RawMessage(nil), req.Arguments...)
 	if len(arguments) > m.config.MaxArgumentBytes {
 		return Snapshot{}, ErrArgumentsTooLarge
@@ -203,6 +223,9 @@ func (m *Manager) Submit(ctx context.Context, req Request) (Snapshot, error) {
 	if m.closing {
 		return Snapshot{}, ErrClosed
 	}
+	if m.halted {
+		return Snapshot{}, ErrBackendUnavailable
+	}
 	if len(m.queue) >= m.config.QueueCapacity {
 		return Snapshot{}, ErrQueueFull
 	}
@@ -218,6 +241,7 @@ func (m *Manager) Submit(ctx context.Context, req Request) (Snapshot, error) {
 		ReadyAt:          now,
 		QueueTimeout:     queueTimeout,
 		ExecutionTimeout: runTimeout,
+		OutputLimitBytes: outputLimit,
 	}, arguments: arguments, deadline: now.Add(queueTimeout)}
 	m.records[id] = r
 	m.queue = append(m.queue, r)
@@ -287,7 +311,7 @@ func (m *Manager) Cancel(id string) (Snapshot, error) {
 func (m *Manager) Stats() Stats {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return Stats{Queued: len(m.queue), Running: m.running, Stored: len(m.records)}
+	return Stats{Queued: len(m.queue), Running: m.running, Stored: len(m.records), Halted: m.halted}
 }
 
 // Close stops admission, cancels accepted work and waits for all owned
@@ -319,6 +343,11 @@ func (m *Manager) Close(ctx context.Context) error {
 	}
 	select {
 	case <-m.done:
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.running != 0 {
+			return ErrStopUnconfirmed
+		}
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -334,6 +363,14 @@ func cloneSnapshot(s Snapshot) Snapshot {
 	if s.FinishedAt != nil {
 		value := *s.FinishedAt
 		s.FinishedAt = &value
+	}
+	if s.ProcessStartedAt != nil {
+		value := *s.ProcessStartedAt
+		s.ProcessStartedAt = &value
+	}
+	if s.ExitCode != nil {
+		value := *s.ExitCode
+		s.ExitCode = &value
 	}
 	return s
 }
