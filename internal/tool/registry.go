@@ -51,10 +51,38 @@ func (e *RunError) Unwrap() error {
 	return e.Err
 }
 
+// Policy narrows the manager's global limits for one registered tool. Zero
+// values inherit the global limit or default. A tool maximum cannot exceed
+// the corresponding manager maximum.
+type Policy struct {
+	DefaultQueueTimeout time.Duration
+	MaxQueueTimeout     time.Duration
+	DefaultRunTimeout   time.Duration
+	MaxRunTimeout       time.Duration
+	DefaultOutputBytes  int
+	MaxOutputBytes      int
+	MaxArgumentBytes    int
+	MaxResultBytes      int
+}
+
+func (p Policy) validate() error {
+	if p.DefaultQueueTimeout < 0 || p.MaxQueueTimeout < 0 || p.DefaultRunTimeout < 0 || p.MaxRunTimeout < 0 ||
+		p.DefaultOutputBytes < 0 || p.MaxOutputBytes < 0 || p.MaxArgumentBytes < 0 || p.MaxResultBytes < 0 {
+		return errors.New("tool policy limits cannot be negative")
+	}
+	if p.MaxQueueTimeout > 0 && p.DefaultQueueTimeout > p.MaxQueueTimeout ||
+		p.MaxRunTimeout > 0 && p.DefaultRunTimeout > p.MaxRunTimeout ||
+		p.MaxOutputBytes > 0 && p.DefaultOutputBytes > p.MaxOutputBytes {
+		return errors.New("tool policy default exceeds its maximum")
+	}
+	return nil
+}
+
 // Definition is a server-owned tool. Validate runs before admission; Execute
 // must return only after its work has stopped when its context is cancelled.
 type Definition struct {
 	Name     string
+	Policy   Policy
 	Validate func(json.RawMessage) error
 	Execute  func(context.Context, json.RawMessage, RunOptions) (Outcome, error)
 }
@@ -77,6 +105,9 @@ func (r *Registry) Register(def Definition) error {
 	}
 	if def.Name == "" || def.Validate == nil || def.Execute == nil {
 		return errors.New("tool requires name, validator and executor")
+	}
+	if err := def.Policy.validate(); err != nil {
+		return fmt.Errorf("tool %q: %w", def.Name, err)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()

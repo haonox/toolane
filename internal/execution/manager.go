@@ -90,28 +90,30 @@ type Request struct {
 
 // Snapshot is an immutable view of an execution at one point in time.
 type Snapshot struct {
-	ID               string          `json:"execution_id"`
-	TenantID         string          `json:"tenant_id"`
-	AgentID          string          `json:"agent_id,omitempty"`
-	Tool             string          `json:"tool"`
-	State            State           `json:"status"`
-	ErrorCode        string          `json:"error_code,omitempty"`
-	ErrorMessage     string          `json:"error_message,omitempty"`
-	StopReason       string          `json:"stop_reason,omitempty"`
-	CleanupStatus    string          `json:"cleanup_status"`
-	Result           json.RawMessage `json:"result,omitempty"`
-	Stdout           string          `json:"stdout,omitempty"`
-	Stderr           string          `json:"stderr,omitempty"`
-	ExitCode         *int            `json:"exit_code,omitempty"`
-	OutputTruncated  bool            `json:"output_truncated"`
-	CreatedAt        time.Time       `json:"created_at"`
-	ReadyAt          time.Time       `json:"ready_at"`
-	RunningAt        *time.Time      `json:"running_at,omitempty"`
-	FinishedAt       *time.Time      `json:"finished_at,omitempty"`
-	ProcessStartedAt *time.Time      `json:"process_started_at,omitempty"`
-	QueueTimeout     time.Duration   `json:"-"`
-	ExecutionTimeout time.Duration   `json:"-"`
-	OutputLimitBytes int             `json:"-"`
+	ID                 string          `json:"execution_id"`
+	TenantID           string          `json:"tenant_id"`
+	AgentID            string          `json:"agent_id,omitempty"`
+	Tool               string          `json:"tool"`
+	State              State           `json:"status"`
+	ErrorCode          string          `json:"error_code,omitempty"`
+	ErrorMessage       string          `json:"error_message,omitempty"`
+	StopReason         string          `json:"stop_reason,omitempty"`
+	CleanupStatus      string          `json:"cleanup_status"`
+	Result             json.RawMessage `json:"result,omitempty"`
+	Stdout             string          `json:"stdout,omitempty"`
+	Stderr             string          `json:"stderr,omitempty"`
+	ExitCode           *int            `json:"exit_code,omitempty"`
+	OutputTruncated    bool            `json:"output_truncated"`
+	CreatedAt          time.Time       `json:"created_at"`
+	ReadyAt            time.Time       `json:"ready_at"`
+	RunningAt          *time.Time      `json:"running_at,omitempty"`
+	FinishedAt         *time.Time      `json:"finished_at,omitempty"`
+	ProcessStartedAt   *time.Time      `json:"process_started_at,omitempty"`
+	QueueTimeout       time.Duration   `json:"-"`
+	ExecutionTimeout   time.Duration   `json:"-"`
+	OutputLimitBytes   int             `json:"-"`
+	ArgumentLimitBytes int             `json:"-"`
+	ResultLimitBytes   int             `json:"-"`
 }
 
 type record struct {
@@ -137,6 +139,7 @@ type Manager struct {
 	cond     *sync.Cond
 	config   Config
 	tools    map[string]tool.Definition
+	policies map[string]effectivePolicy
 	records  map[string]*record
 	queue    []*record
 	terminal []string
@@ -158,13 +161,23 @@ func NewManager(config Config, registry *tool.Registry) (*Manager, error) {
 	if registry == nil {
 		return nil, errors.New("nil tool registry")
 	}
+	definitions := registry.Snapshot()
+	policies := make(map[string]effectivePolicy, len(definitions))
+	for name, def := range definitions {
+		policy, err := resolveToolPolicy(def.Policy, config)
+		if err != nil {
+			return nil, fmt.Errorf("tool %q policy: %w", name, err)
+		}
+		policies[name] = policy
+	}
 	m := &Manager{
-		config:  config,
-		tools:   registry.Snapshot(),
-		records: make(map[string]*record),
-		expiry:  make(chan struct{}, 1),
-		stop:    make(chan struct{}),
-		done:    make(chan struct{}),
+		config:   config,
+		tools:    definitions,
+		policies: policies,
+		records:  make(map[string]*record),
+		expiry:   make(chan struct{}, 1),
+		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
 	}
 	m.cond = sync.NewCond(&m.mu)
 	m.workers.Add(config.Workers + 1)
@@ -189,23 +202,24 @@ func (m *Manager) Submit(ctx context.Context, req Request) (Snapshot, error) {
 	if !ok {
 		return Snapshot{}, fmt.Errorf("unknown tool %q", req.Tool)
 	}
-	queueTimeout, err := resolveTimeout(req.QueueTimeout, m.config.DefaultQueueTimeout, m.config.MaxQueueTimeout)
+	policy := m.policies[req.Tool]
+	queueTimeout, err := resolveTimeout(req.QueueTimeout, policy.defaultQueueTimeout, policy.maxQueueTimeout)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("queue timeout: %w", err)
 	}
-	runTimeout, err := resolveTimeout(req.ExecutionTimeout, m.config.DefaultRunTimeout, m.config.MaxRunTimeout)
+	runTimeout, err := resolveTimeout(req.ExecutionTimeout, policy.defaultRunTimeout, policy.maxRunTimeout)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("execution timeout: %w", err)
 	}
 	outputLimit := req.OutputLimitBytes
-	if outputLimit < 0 || outputLimit > m.config.MaxOutputBytes {
+	if outputLimit < 0 || outputLimit > policy.maxOutputBytes {
 		return Snapshot{}, errors.New("output limit outside allowed range")
 	}
 	if outputLimit == 0 {
-		outputLimit = m.config.MaxOutputBytes
+		outputLimit = policy.defaultOutputBytes
 	}
 	arguments := append(json.RawMessage(nil), req.Arguments...)
-	if len(arguments) > m.config.MaxArgumentBytes {
+	if len(arguments) > policy.maxArgumentBytes {
 		return Snapshot{}, ErrArgumentsTooLarge
 	}
 	if err := def.Validate(arguments); err != nil {
@@ -231,17 +245,19 @@ func (m *Manager) Submit(ctx context.Context, req Request) (Snapshot, error) {
 	}
 	now := time.Now().UTC()
 	r := &record{snapshot: Snapshot{
-		ID:               id,
-		TenantID:         "local",
-		AgentID:          req.AgentID,
-		Tool:             req.Tool,
-		State:            Queued,
-		CleanupStatus:    "not_needed",
-		CreatedAt:        now,
-		ReadyAt:          now,
-		QueueTimeout:     queueTimeout,
-		ExecutionTimeout: runTimeout,
-		OutputLimitBytes: outputLimit,
+		ID:                 id,
+		TenantID:           "local",
+		AgentID:            req.AgentID,
+		Tool:               req.Tool,
+		State:              Queued,
+		CleanupStatus:      "not_needed",
+		CreatedAt:          now,
+		ReadyAt:            now,
+		QueueTimeout:       queueTimeout,
+		ExecutionTimeout:   runTimeout,
+		OutputLimitBytes:   outputLimit,
+		ArgumentLimitBytes: policy.maxArgumentBytes,
+		ResultLimitBytes:   policy.maxResultBytes,
 	}, arguments: arguments, deadline: now.Add(queueTimeout)}
 	m.records[id] = r
 	m.queue = append(m.queue, r)
