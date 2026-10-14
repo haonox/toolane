@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -330,4 +331,58 @@ func TestStartFailureDoesNotConsumeSlot(t *testing.T) {
 			t.Fatalf("start failure: %+v, stats=%+v", final, m.Stats())
 		}
 	}
+}
+
+// ACC-07: repeated cancellation and shutdown leave no active process or slot.
+func TestRepeatedCancelAndShutdownReleaseProcesses(t *testing.T) {
+	beforeGoroutines := runtime.NumGoroutine()
+	for i := range 8 {
+		ready := t.TempDir() + "/ready"
+		m := processManager(t, "sleep", ready, execution.DefaultConfig())
+		s := submitProcess(t, m, 0)
+		awaitFile(t, ready)
+		data, err := os.ReadFile(ready)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i%2 == 0 {
+			stopping, err := m.Cancel(s.ID)
+			if err != nil || stopping.State != execution.Cancelling {
+				t.Fatalf("cancel iteration %d: %+v, %v", i, stopping, err)
+			}
+			if final := awaitProcess(t, m, s.ID); final.State != execution.Cancelled {
+				t.Fatalf("cancel iteration %d: %+v", i, final)
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if err := m.Close(ctx); err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+		cancel()
+		if final, err := m.Get(s.ID); err != nil || final.State != execution.Cancelled {
+			t.Fatalf("shutdown iteration %d: %+v, %v", i, final, err)
+		}
+		if stats := m.Stats(); stats.Running != 0 || stats.Queued != 0 {
+			t.Fatalf("iteration %d retained a slot: %+v", i, stats)
+		}
+		deadline := time.NewTimer(2 * time.Second)
+		for processStillAlive(pid) {
+			select {
+			case <-time.After(10 * time.Millisecond):
+			case <-deadline.C:
+				t.Fatalf("iteration %d left process %d alive", i, pid)
+			}
+		}
+		deadline.Stop()
+	}
+	afterGoroutines := runtime.NumGoroutine()
+	if afterGoroutines > beforeGoroutines+8 {
+		t.Fatalf("goroutines grew from %d to %d", beforeGoroutines, afterGoroutines)
+	}
+	t.Logf("ACC-07: cancel/shutdown cycles=%d, goroutines before=%d after=%d", 8, beforeGoroutines, afterGoroutines)
 }

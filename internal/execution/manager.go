@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +19,7 @@ var (
 	ErrNotFound           = errors.New("execution not found")
 	ErrQueueFull          = errors.New("execution queue full")
 	ErrClosed             = errors.New("execution manager closed")
+	ErrAgentIDTooLarge    = errors.New("agent ID exceeds limit")
 	ErrArgumentsTooLarge  = errors.New("tool arguments exceed limit")
 	ErrBackendUnavailable = errors.New("execution backend unavailable")
 	ErrStopUnconfirmed    = errors.New("execution stop could not be confirmed")
@@ -39,35 +41,39 @@ const (
 // Config bounds all active work and retained results. Use DefaultConfig as a
 // starting point, then change fields before creating a Manager.
 type Config struct {
-	Workers             int
-	QueueCapacity       int
-	RetainedResults     int
-	DefaultQueueTimeout time.Duration
-	MaxQueueTimeout     time.Duration
-	DefaultRunTimeout   time.Duration
-	MaxRunTimeout       time.Duration
-	MaxResultBytes      int
-	MaxArgumentBytes    int
-	MaxOutputBytes      int
+	Workers              int
+	QueueCapacity        int
+	RetainedResults      int
+	DefaultQueueTimeout  time.Duration
+	MaxQueueTimeout      time.Duration
+	DefaultRunTimeout    time.Duration
+	MaxRunTimeout        time.Duration
+	MaxResultBytes       int
+	MaxArgumentBytes     int
+	MaxOutputBytes       int
+	MaxAgentIDBytes      int
+	MaxErrorMessageBytes int
 }
 
 func DefaultConfig() Config {
 	return Config{
-		Workers:             4,
-		QueueCapacity:       256,
-		RetainedResults:     1000,
-		DefaultQueueTimeout: 30 * time.Second,
-		MaxQueueTimeout:     300 * time.Second,
-		DefaultRunTimeout:   10 * time.Second,
-		MaxRunTimeout:       60 * time.Second,
-		MaxResultBytes:      64 * 1024,
-		MaxArgumentBytes:    256 * 1024,
-		MaxOutputBytes:      1024 * 1024,
+		Workers:              4,
+		QueueCapacity:        256,
+		RetainedResults:      1000,
+		DefaultQueueTimeout:  30 * time.Second,
+		MaxQueueTimeout:      300 * time.Second,
+		DefaultRunTimeout:    10 * time.Second,
+		MaxRunTimeout:        60 * time.Second,
+		MaxResultBytes:       64 * 1024,
+		MaxArgumentBytes:     256 * 1024,
+		MaxOutputBytes:       1024 * 1024,
+		MaxAgentIDBytes:      256,
+		MaxErrorMessageBytes: 4 * 1024,
 	}
 }
 
 func (c Config) validate() error {
-	if c.Workers <= 0 || c.QueueCapacity <= 0 || c.RetainedResults <= 0 || c.MaxResultBytes <= 0 || c.MaxArgumentBytes <= 0 || c.MaxOutputBytes <= 0 {
+	if c.Workers <= 0 || c.QueueCapacity <= 0 || c.RetainedResults <= 0 || c.MaxResultBytes <= 0 || c.MaxArgumentBytes <= 0 || c.MaxOutputBytes <= 0 || c.MaxAgentIDBytes <= 0 || c.MaxErrorMessageBytes <= 0 {
 		return errors.New("workers, queue capacity, retained results and byte limits must be positive")
 	}
 	if c.DefaultQueueTimeout <= 0 || c.MaxQueueTimeout < c.DefaultQueueTimeout ||
@@ -198,6 +204,9 @@ func (m *Manager) Submit(ctx context.Context, req Request) (Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return Snapshot{}, err
 	}
+	if len(req.AgentID) > m.config.MaxAgentIDBytes {
+		return Snapshot{}, ErrAgentIDTooLarge
+	}
 	def, ok := m.tools[req.Tool]
 	if !ok {
 		return Snapshot{}, fmt.Errorf("unknown tool %q", req.Tool)
@@ -218,10 +227,10 @@ func (m *Manager) Submit(ctx context.Context, req Request) (Snapshot, error) {
 	if outputLimit == 0 {
 		outputLimit = policy.defaultOutputBytes
 	}
-	arguments := append(json.RawMessage(nil), req.Arguments...)
-	if len(arguments) > policy.maxArgumentBytes {
+	if len(req.Arguments) > policy.maxArgumentBytes {
 		return Snapshot{}, ErrArgumentsTooLarge
 	}
+	arguments := append(json.RawMessage(nil), req.Arguments...)
 	if err := def.Validate(arguments); err != nil {
 		return Snapshot{}, fmt.Errorf("invalid tool arguments: %w", err)
 	}
@@ -405,7 +414,7 @@ func (m *Manager) removeQueued(target *record) {
 func (m *Manager) finishLocked(r *record, state State, code, message string) {
 	r.snapshot.State = state
 	r.snapshot.ErrorCode = code
-	r.snapshot.ErrorMessage = message
+	r.snapshot.ErrorMessage = m.limitErrorMessage(message)
 	now := time.Now().UTC()
 	r.snapshot.FinishedAt = &now
 	r.arguments = nil
@@ -416,6 +425,13 @@ func (m *Manager) finishLocked(r *record, state State, code, message string) {
 		m.terminal = m.terminal[1:]
 		delete(m.records, id)
 	}
+}
+
+func (m *Manager) limitErrorMessage(message string) string {
+	if len(message) > m.config.MaxErrorMessageBytes {
+		message = message[:m.config.MaxErrorMessageBytes]
+	}
+	return strings.ToValidUTF8(message, "?")
 }
 
 func (m *Manager) wakeExpiry() {

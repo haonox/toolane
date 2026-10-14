@@ -123,7 +123,7 @@ func (m *Manager) complete(r *record, ctx context.Context, outcome tool.Outcome,
 	}
 	r.snapshot.ExitCode = outcome.ExitCode
 	r.snapshot.OutputTruncated = outcome.OutputTruncated
-	stdout, stderr := []byte(outcome.Stdout), []byte(outcome.Stderr)
+	stdout, stderr := outcome.Stdout, outcome.Stderr
 	limit := r.snapshot.OutputLimitBytes
 	if len(stdout) > limit {
 		stdout = stdout[:limit]
@@ -133,8 +133,8 @@ func (m *Manager) complete(r *record, ctx context.Context, outcome tool.Outcome,
 		stderr = stderr[:limit-len(stdout)]
 		r.snapshot.OutputTruncated = true
 	}
-	r.snapshot.Stdout = strings.ToValidUTF8(string(stdout), "?")
-	r.snapshot.Stderr = strings.ToValidUTF8(string(stderr), "?")
+	r.snapshot.Stdout = strings.ToValidUTF8(stdout, "?")
+	r.snapshot.Stderr = strings.ToValidUTF8(stderr, "?")
 	if outcome.StopUnconfirmed {
 		if r.snapshot.State == Running {
 			r.snapshot.State = Cancelling
@@ -142,7 +142,7 @@ func (m *Manager) complete(r *record, ctx context.Context, outcome tool.Outcome,
 		}
 		r.snapshot.CleanupStatus = "failed"
 		if err != nil {
-			r.snapshot.ErrorMessage = err.Error()
+			r.snapshot.ErrorMessage = m.limitErrorMessage(err.Error())
 		}
 		m.halted = true
 		m.cond.Broadcast()
