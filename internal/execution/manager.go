@@ -16,13 +16,20 @@ import (
 )
 
 var (
-	ErrNotFound           = errors.New("execution not found")
-	ErrQueueFull          = errors.New("execution queue full")
-	ErrClosed             = errors.New("execution manager closed")
-	ErrAgentIDTooLarge    = errors.New("agent ID exceeds limit")
-	ErrArgumentsTooLarge  = errors.New("tool arguments exceed limit")
+	// ErrNotFound indicates that an execution is not retained by the manager.
+	ErrNotFound = errors.New("execution not found")
+	// ErrQueueFull indicates that the bounded admission queue has no capacity.
+	ErrQueueFull = errors.New("execution queue full")
+	// ErrClosed indicates that the manager no longer accepts work.
+	ErrClosed = errors.New("execution manager closed")
+	// ErrAgentIDTooLarge indicates that an agent ID exceeds its byte limit.
+	ErrAgentIDTooLarge = errors.New("agent ID exceeds limit")
+	// ErrArgumentsTooLarge indicates that tool arguments exceed their byte limit.
+	ErrArgumentsTooLarge = errors.New("tool arguments exceed limit")
+	// ErrBackendUnavailable indicates that new work is paused after an unconfirmed stop.
 	ErrBackendUnavailable = errors.New("execution backend unavailable")
-	ErrStopUnconfirmed    = errors.New("execution stop could not be confirmed")
+	// ErrStopUnconfirmed indicates that shutdown could not confirm all work stopped.
+	ErrStopUnconfirmed = errors.New("execution stop could not be confirmed")
 )
 
 // State describes the public execution lifecycle.
@@ -38,8 +45,8 @@ const (
 	Cancelled  State = "cancelled"
 )
 
-// Config bounds all active work and retained results. Use DefaultConfig as a
-// starting point, then change fields before creating a Manager.
+// Config bounds active work and retained results. Use DefaultConfig as a
+// starting point, then adjust fields before creating a Manager.
 type Config struct {
 	Workers              int
 	QueueCapacity        int
@@ -55,6 +62,7 @@ type Config struct {
 	MaxErrorMessageBytes int
 }
 
+// DefaultConfig returns the default bounded local execution configuration.
 func DefaultConfig() Config {
 	return Config{
 		Workers:              4,
@@ -83,8 +91,9 @@ func (c Config) validate() error {
 	return nil
 }
 
-// Request is copied on admission. A cancelled Submit context prevents
-// admission, but does not become the accepted execution's lifetime context.
+// Request describes one tool execution. Arguments are copied on admission. A
+// cancelled Submit context prevents admission but does not own an accepted
+// execution's lifetime.
 type Request struct {
 	AgentID          string
 	Tool             string
@@ -137,8 +146,8 @@ type Stats struct {
 	Halted  bool
 }
 
-// Manager owns state changes, the FIFO queue, worker slots and cancellations.
-// Each admitted running tool occupies one worker until Execute returns; the
+// Manager owns state transitions, the FIFO queue, worker slots, and
+// cancellation. A running tool occupies a worker until Execute returns; an
 // executor must stop its work before returning after cancellation.
 type Manager struct {
 	mu       sync.Mutex
@@ -158,7 +167,7 @@ type Manager struct {
 	workers  sync.WaitGroup
 }
 
-// NewManager freezes the registry and starts a fixed worker pool and one queue
+// NewManager freezes the registry and starts a fixed worker pool plus one queue
 // deadline monitor. Call Close to stop them.
 func NewManager(config Config, registry *tool.Registry) (*Manager, error) {
 	if err := config.validate(); err != nil {
@@ -199,7 +208,7 @@ func NewManager(config Config, registry *tool.Registry) (*Manager, error) {
 }
 
 // Submit validates a request before admission and returns its initial queued
-// state. Queue limits count accepted work that has not been claimed by a worker.
+// state. Queue limits count accepted work not yet claimed by a worker.
 func (m *Manager) Submit(ctx context.Context, req Request) (Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return Snapshot{}, err
@@ -332,16 +341,16 @@ func (m *Manager) Cancel(id string) (Snapshot, error) {
 	return snapshot, nil
 }
 
-// Stats returns queue, running and retained record counts.
+// Stats returns queue, running, and retained record counts.
 func (m *Manager) Stats() Stats {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return Stats{Queued: len(m.queue), Running: m.running, Stored: len(m.records), Halted: m.halted}
 }
 
-// Close stops admission, cancels accepted work and waits for all owned
-// goroutines. A context deadline bounds the caller's wait, while cleanup keeps
-// running until cooperative executors actually return.
+// Close stops admission, cancels accepted work, and waits for all owned
+// goroutines. A context deadline bounds the caller's wait while cleanup keeps
+// running until cooperative executors return.
 func (m *Manager) Close(ctx context.Context) error {
 	m.mu.Lock()
 	var cancels []context.CancelFunc
