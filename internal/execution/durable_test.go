@@ -57,7 +57,7 @@ func TestDurableAdmissionClaimAndCompletion(t *testing.T) {
 		seenState = State(row.State)
 		return tool.Outcome{Result: json.RawMessage(`{"ok":true}`)}, nil
 	})
-	m, err := NewDurableManager(ctx, DefaultConfig(), registry, s, func(context.Context) error { return nil })
+	m, err := NewDurableManager(ctx, DefaultConfig(), registry, s, func(context.Context, []RecoveryResource) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestDurableIdempotencyBeforeCapacityCheck(t *testing.T) {
 		}
 		return tool.Outcome{}, nil
 	})
-	m, err := NewDurableManager(ctx, config, registry, s, func(context.Context) error { return nil })
+	m, err := NewDurableManager(ctx, config, registry, s, func(context.Context, []RecoveryResource) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestDurableRestartResumesQueuedAndInterruptsClaimed(t *testing.T) {
 		calls.Add(1)
 		return tool.Outcome{}, nil
 	})
-	m, err := NewDurableManager(ctx, DefaultConfig(), registry, s, func(context.Context) error {
+	m, err := NewDurableManager(ctx, DefaultConfig(), registry, s, func(context.Context, []RecoveryResource) error {
 		recovered.Store(true)
 		return nil
 	})
@@ -240,7 +240,7 @@ func TestDurableRecoveryFailureKeepsWorkersStopped(t *testing.T) {
 		calls.Add(1)
 		return tool.Outcome{}, nil
 	})
-	if _, err := NewDurableManager(ctx, DefaultConfig(), registry, s, func(context.Context) error {
+	if _, err := NewDurableManager(ctx, DefaultConfig(), registry, s, func(context.Context, []RecoveryResource) error {
 		return errors.New("resource cleanup uncertain")
 	}); err == nil {
 		t.Fatal("recovery failure allowed manager startup")
@@ -248,11 +248,11 @@ func TestDurableRecoveryFailureKeepsWorkersStopped(t *testing.T) {
 	if calls.Load() != 0 {
 		t.Fatal("worker ran despite failed recovery")
 	}
-	m, err := NewDurableManager(ctx, DefaultConfig(), registry, s, func(context.Context) error { return nil })
+	m, err := NewDurableManager(ctx, DefaultConfig(), registry, s, func(context.Context, []RecoveryResource) error { return nil })
 	if err != nil {
 		t.Fatalf("failed constructor retained runtime claim: %v", err)
 	}
-	if _, err := NewDurableManager(ctx, DefaultConfig(), registry, s, func(context.Context) error { return nil }); !errors.Is(err, sqlite.ErrRuntimeOwned) {
+	if _, err := NewDurableManager(ctx, DefaultConfig(), registry, s, func(context.Context, []RecoveryResource) error { return nil }); !errors.Is(err, sqlite.ErrRuntimeOwned) {
 		t.Fatalf("second manager on one store: %v", err)
 	}
 	if err := s.Close(); !errors.Is(err, sqlite.ErrRuntimeOwned) {
@@ -278,7 +278,7 @@ func TestDurableCancelAndTimeoutArePersisted(t *testing.T) {
 		<-ctx.Done()
 		return tool.Outcome{}, ctx.Err()
 	})
-	m, err := NewDurableManager(ctx, config, registry, s, func(context.Context) error { return nil })
+	m, err := NewDurableManager(ctx, config, registry, s, func(context.Context, []RecoveryResource) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,7 +337,7 @@ func TestDurableClaimFailureDoesNotRunTool(t *testing.T) {
 		}
 		return tool.Outcome{}, nil
 	})
-	m, err := NewDurableManager(ctx, config, registry, s, func(context.Context) error { return nil })
+	m, err := NewDurableManager(ctx, config, registry, s, func(context.Context, []RecoveryResource) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,4 +376,172 @@ func TestDurableClaimFailureDoesNotRunTool(t *testing.T) {
 	if err := m.Close(ctxClose); err == nil {
 		t.Fatal("close did not report storage failure")
 	}
+}
+
+func TestDurableResourceOwnershipPersistsAndReachesRecovery(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "state")
+	s := openDurableStore(t, dir)
+	ref := tool.ResourceRef{Kind: tool.ResourceDockerContainer, ID: "container-123", InstanceID: "deployment"}
+	var recorded atomic.Bool
+	registry := durableRegistry(t, func(_ context.Context, _ json.RawMessage, options tool.RunOptions) (tool.Outcome, error) {
+		if err := options.OnResourceCreated(ref); err != nil {
+			return tool.Outcome{}, err
+		}
+		row, err := s.GetExecution(ctx, options.ExecutionID)
+		if err != nil {
+			return tool.Outcome{}, err
+		}
+		var stored storedRecord
+		if err := json.Unmarshal(row.Snapshot, &stored); err != nil {
+			return tool.Outcome{}, err
+		}
+		if stored.Resource == nil || *stored.Resource != ref || stored.Snapshot.CleanupStatus != "pending" || row.State != string(Running) {
+			return tool.Outcome{}, errors.New("resource was not committed before tool continued")
+		}
+		recorded.Store(true)
+		return tool.Outcome{CleanupStatus: "pending"}, nil
+	})
+	m, err := NewDurableManager(ctx, DefaultConfig(), registry, s, func(context.Context, []RecoveryResource) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := m.Submit(ctx, Request{Tool: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := awaitState(t, m, initial.ID, Succeeded)
+	if !recorded.Load() || finished.CleanupStatus != "pending" {
+		t.Fatalf("resource callback did not persist ownership: %+v", finished)
+	}
+	events, err := s.EventsAfter(ctx, initial.ID, 0)
+	if err != nil || len(events) != 4 || events[2].Kind != "resource_created" {
+		t.Fatalf("missing resource event: %+v err=%v", events, err)
+	}
+	closeDurableManager(t, m)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s = openDurableStore(t, dir)
+	defer s.Close()
+	recovered := false
+	m, err = NewDurableManager(ctx, DefaultConfig(), registry, s, func(_ context.Context, resources []RecoveryResource) error {
+		if len(resources) != 1 || resources[0].ExecutionID != initial.ID || resources[0].Ref != ref {
+			return errors.New("recovery did not receive the persisted resource")
+		}
+		recovered = true
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !recovered {
+		t.Fatal("resource recovery hook was not called")
+	}
+	closeDurableManager(t, m)
+}
+
+func TestDurableResourceWriteFailureDoesNotCommitOwnership(t *testing.T) {
+	ctx := context.Background()
+	s := openDurableStore(t, filepath.Join(t.TempDir(), "state"))
+	defer s.Close()
+	entered := make(chan struct{})
+	proceed := make(chan struct{})
+	callbackResult := make(chan error, 1)
+	registry := durableRegistry(t, func(_ context.Context, _ json.RawMessage, options tool.RunOptions) (tool.Outcome, error) {
+		close(entered)
+		<-proceed
+		err := options.OnResourceCreated(tool.ResourceRef{Kind: tool.ResourceDockerContainer, ID: "container-123", InstanceID: "deployment"})
+		callbackResult <- err
+		return tool.Outcome{CleanupStatus: "succeeded"}, err
+	})
+	config := DefaultConfig()
+	config.Workers = 1
+	m, err := NewDurableManager(ctx, config, registry, s, func(context.Context, []RecoveryResource) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := m.Submit(ctx, Request{Tool: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+	m.mu.Lock()
+	m.records[initial.ID].version = 99 // Inject a failed compare-and-swap on the resource write.
+	m.mu.Unlock()
+	close(proceed)
+	if err := <-callbackResult; !errors.Is(err, sqlite.ErrVersionConflict) {
+		t.Fatalf("resource callback accepted failed write: %v", err)
+	}
+	if !m.Stats().Halted {
+		t.Fatal("resource write failure did not halt admission")
+	}
+	row, err := s.GetExecution(ctx, initial.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored storedRecord
+	if err := json.Unmarshal(row.Snapshot, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Resource != nil || row.State != string(Running) {
+		t.Fatalf("failed resource write changed persisted ownership: %+v", stored)
+	}
+	closeCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if err := m.Close(closeCtx); err == nil {
+		t.Fatal("close hid the storage failure")
+	}
+}
+
+func TestDurableRecoveryFailureDoesNotInterruptOwnedResource(t *testing.T) {
+	ctx := context.Background()
+	s := openDurableStore(t, filepath.Join(t.TempDir(), "state"))
+	defer s.Close()
+	seedDurableExecution(t, s, "claimed", time.Now().UTC(), time.Minute, true)
+	row, err := s.GetExecution(ctx, "claimed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored storedRecord
+	if err := json.Unmarshal(row.Snapshot, &stored); err != nil {
+		t.Fatal(err)
+	}
+	ref := tool.ResourceRef{Kind: tool.ResourceDockerContainer, ID: "container-123", InstanceID: "deployment"}
+	stored.Resource = &ref
+	stored.Snapshot.CleanupStatus = "pending"
+	encoded, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Transition(ctx, row.ID, row.Version, string(Running), encoded,
+		sqlite.Event{Kind: "resource_created", Payload: []byte(`{"resource_kind":"docker_container"}`), OccurredAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	registry := durableRegistry(t, func(context.Context, json.RawMessage, tool.RunOptions) (tool.Outcome, error) {
+		calls.Add(1)
+		return tool.Outcome{}, nil
+	})
+	if _, err := NewDurableManager(ctx, DefaultConfig(), registry, s, func(_ context.Context, resources []RecoveryResource) error {
+		if len(resources) != 1 || resources[0].Ref != ref {
+			return errors.New("lost persisted resource during recovery")
+		}
+		return errors.New("Docker stop not confirmed")
+	}); err == nil {
+		t.Fatal("manager started despite failed resource recovery")
+	}
+	row, err = s.GetExecution(ctx, "claimed")
+	if err != nil || row.State != string(Running) || calls.Load() != 0 {
+		t.Fatalf("failed recovery changed claimed task: row=%+v calls=%d err=%v", row, calls.Load(), err)
+	}
+	m, err := NewDurableManager(ctx, DefaultConfig(), registry, s, func(context.Context, []RecoveryResource) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := m.Get("claimed")
+	if err != nil || snapshot.State != Interrupted || calls.Load() != 0 {
+		t.Fatalf("confirmed recovery did not interrupt without rerun: %+v calls=%d err=%v", snapshot, calls.Load(), err)
+	}
+	closeDurableManager(t, m)
 }

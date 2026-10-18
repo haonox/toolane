@@ -89,6 +89,12 @@ func (r *runner) run(ctx context.Context, script string, options tool.RunOptions
 		return out, &tool.RunError{Code: "sandbox_create_failed", Err: err}
 	}
 	created = true
+	if options.OnResourceCreated != nil {
+		ref := tool.ResourceRef{Kind: tool.ResourceDockerContainer, ID: id, InstanceID: r.spec.InstanceID}
+		if err := options.OnResourceCreated(ref); err != nil {
+			return out, &tool.RunError{Code: "sandbox_resource_record_failed", Err: err}
+		}
+	}
 	info, err := r.inspect(ctx, id)
 	if err != nil {
 		return out, &tool.RunError{Code: "sandbox_policy_unavailable", Err: err}

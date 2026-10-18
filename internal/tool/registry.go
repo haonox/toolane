@@ -18,9 +18,23 @@ type RunOptions struct {
 	OnOutputLimit    func()
 	OnProcessStarted func(time.Time)
 	OnCleanupUpdate  func(status, message string)
-	SandboxResources Resources
-	ExecutionID      string
+	// OnResourceCreated records a Docker container before it starts. A failure
+	// requires the executor to clean up the new container without starting it.
+	OnResourceCreated func(ResourceRef) error
+	SandboxResources  Resources
+	ExecutionID       string
 }
+
+// ResourceRef identifies a resource created for one execution. InstanceID is
+// the stable deployment owner used to find Docker containers after a crash.
+type ResourceRef struct {
+	Kind       string `json:"kind"`
+	ID         string `json:"id"`
+	InstanceID string `json:"instance_id"`
+}
+
+// ResourceDockerContainer identifies a Docker container owned by one run.
+const ResourceDockerContainer = "docker_container"
 
 // Resources is a server-owned sandbox reservation. Zero means the tool does
 // not reserve sandbox CPU or memory (for example, Mock or trusted Process).
