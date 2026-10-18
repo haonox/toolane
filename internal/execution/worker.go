@@ -22,6 +22,7 @@ func (m *Manager) worker() {
 			MaxOutputBytes:   r.snapshot.OutputLimitBytes,
 			OnOutputLimit:    func() { m.outputLimitReached(r) },
 			OnProcessStarted: func(at time.Time) { m.processStarted(r, at) },
+			SandboxResources: tool.Resources{CPUMilli: r.snapshot.SandboxCPUMilli, MemoryBytes: r.snapshot.SandboxMemoryBytes},
 		}
 		outcome, err := runTool(ctx, m.tools[r.snapshot.Tool].Execute, r.arguments, options)
 		if !m.complete(r, ctx, outcome, err) {

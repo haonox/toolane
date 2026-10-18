@@ -34,6 +34,9 @@ var (
 	ErrBackendUnavailable = errors.New("execution backend unavailable")
 	// ErrStopUnconfirmed indicates that shutdown could not confirm all work stopped.
 	ErrStopUnconfirmed = errors.New("execution stop could not be confirmed")
+	// ErrSandboxBudgetExceeded means a registered tool asks for more sandbox
+	// resources than the manager can ever reserve for one execution.
+	ErrSandboxBudgetExceeded = errors.New("sandbox request exceeds configured budget")
 )
 
 // State describes the public execution lifecycle.
@@ -63,53 +66,64 @@ const (
 // Config bounds active work and retained results. Use DefaultConfig as a
 // starting point, then adjust fields before creating a Manager.
 type Config struct {
-	Workers              int
-	QueueCapacity        int
-	TenantRunningLimit   int
-	TenantPendingLimit   int
-	MaxTenantIDBytes     int
-	Scheduler            SchedulerMode
-	RetainedResults      int
-	MaxWorkflowNodes     int
-	MaxWorkflowBytes     int
-	DefaultQueueTimeout  time.Duration
-	MaxQueueTimeout      time.Duration
-	DefaultRunTimeout    time.Duration
-	MaxRunTimeout        time.Duration
-	MaxResultBytes       int
-	MaxArgumentBytes     int
-	MaxOutputBytes       int
-	MaxAgentIDBytes      int
-	MaxErrorMessageBytes int
+	Workers                  int
+	QueueCapacity            int
+	TenantRunningLimit       int
+	TenantPendingLimit       int
+	MaxTenantIDBytes         int
+	Scheduler                SchedulerMode
+	RetainedResults          int
+	MaxWorkflowNodes         int
+	MaxWorkflowBytes         int
+	DefaultQueueTimeout      time.Duration
+	MaxQueueTimeout          time.Duration
+	DefaultRunTimeout        time.Duration
+	MaxRunTimeout            time.Duration
+	MaxResultBytes           int
+	MaxArgumentBytes         int
+	MaxOutputBytes           int
+	MaxAgentIDBytes          int
+	MaxErrorMessageBytes     int
+	SandboxMaxCPUMilli       int
+	SandboxMaxMemoryBytes    int64
+	SandboxCPUBudgetMilli    int
+	SandboxMemoryBudgetBytes int64
 }
 
 // DefaultConfig returns the default bounded local execution configuration.
 func DefaultConfig() Config {
 	return Config{
-		Workers:              4,
-		QueueCapacity:        256,
-		TenantRunningLimit:   2,
-		TenantPendingLimit:   64,
-		MaxTenantIDBytes:     256,
-		Scheduler:            SchedulerRoundRobin,
-		RetainedResults:      1000,
-		MaxWorkflowNodes:     64,
-		MaxWorkflowBytes:     256 * 1024,
-		DefaultQueueTimeout:  30 * time.Second,
-		MaxQueueTimeout:      300 * time.Second,
-		DefaultRunTimeout:    10 * time.Second,
-		MaxRunTimeout:        60 * time.Second,
-		MaxResultBytes:       64 * 1024,
-		MaxArgumentBytes:     256 * 1024,
-		MaxOutputBytes:       1024 * 1024,
-		MaxAgentIDBytes:      256,
-		MaxErrorMessageBytes: 4 * 1024,
+		Workers:                  4,
+		QueueCapacity:            256,
+		TenantRunningLimit:       2,
+		TenantPendingLimit:       64,
+		MaxTenantIDBytes:         256,
+		Scheduler:                SchedulerRoundRobin,
+		RetainedResults:          1000,
+		MaxWorkflowNodes:         64,
+		MaxWorkflowBytes:         256 * 1024,
+		DefaultQueueTimeout:      30 * time.Second,
+		MaxQueueTimeout:          300 * time.Second,
+		DefaultRunTimeout:        10 * time.Second,
+		MaxRunTimeout:            60 * time.Second,
+		MaxResultBytes:           64 * 1024,
+		MaxArgumentBytes:         256 * 1024,
+		MaxOutputBytes:           1024 * 1024,
+		MaxAgentIDBytes:          256,
+		MaxErrorMessageBytes:     4 * 1024,
+		SandboxMaxCPUMilli:       1000,
+		SandboxMaxMemoryBytes:    256 * 1024 * 1024,
+		SandboxCPUBudgetMilli:    4000,
+		SandboxMemoryBudgetBytes: 1024 * 1024 * 1024,
 	}
 }
 
 func (c Config) validate() error {
 	if c.Workers <= 0 || c.QueueCapacity <= 0 || c.TenantRunningLimit <= 0 || c.TenantPendingLimit <= 0 || c.MaxTenantIDBytes <= 0 || c.RetainedResults <= 0 || c.MaxWorkflowNodes <= 0 || c.MaxWorkflowBytes <= 0 || c.MaxResultBytes <= 0 || c.MaxArgumentBytes <= 0 || c.MaxOutputBytes <= 0 || c.MaxAgentIDBytes <= 0 || c.MaxErrorMessageBytes <= 0 {
 		return errors.New("workers, global and tenant capacities, retained results and byte limits must be positive")
+	}
+	if c.SandboxMaxCPUMilli <= 0 || c.SandboxMaxMemoryBytes <= 0 || c.SandboxCPUBudgetMilli < c.SandboxMaxCPUMilli || c.SandboxMemoryBudgetBytes < c.SandboxMaxMemoryBytes {
+		return errors.New("sandbox per-task limits must be positive and fit within total budgets")
 	}
 	if c.MaxTenantIDBytes < len("local") {
 		return errors.New("tenant ID byte limit must allow the local tenant")
@@ -165,6 +179,8 @@ type Snapshot struct {
 	OutputLimitBytes   int             `json:"-"`
 	ArgumentLimitBytes int             `json:"-"`
 	ResultLimitBytes   int             `json:"-"`
+	SandboxCPUMilli    int             `json:"sandbox_cpu_millicores,omitempty"`
+	SandboxMemoryBytes int64           `json:"sandbox_memory_bytes,omitempty"`
 }
 
 type record struct {
@@ -180,40 +196,44 @@ type record struct {
 
 // Stats reports current capacity use. It is a snapshot, not a reservation.
 type Stats struct {
-	Queued  int
-	Blocked int
-	Pending int
-	Running int
-	Stored  int
-	Tenants int
-	Halted  bool
+	Queued                     int
+	Blocked                    int
+	Pending                    int
+	Running                    int
+	Stored                     int
+	Tenants                    int
+	Halted                     bool
+	ReservedSandboxCPUMilli    int
+	ReservedSandboxMemoryBytes int64
 }
 
 // Manager owns state transitions, the ready queue, worker slots, and
 // cancellation. A running tool occupies a worker until Execute returns; an
 // executor must stop its work before returning after cancellation.
 type Manager struct {
-	mu            sync.Mutex
-	cond          *sync.Cond
-	config        Config
-	tools         map[string]tool.Definition
-	policies      map[string]effectivePolicy
-	records       map[string]*record
-	workflows     map[string]*workflow
-	tenants       map[string]*tenantState
-	tenantOrder   []string
-	rrCursor      int
-	queue         []*record
-	terminal      []terminalGroup
-	terminalCount int
-	pending       int
-	running       int
-	closing       bool
-	halted        bool
-	expiry        chan struct{}
-	stop          chan struct{}
-	done          chan struct{}
-	workers       sync.WaitGroup
+	mu                         sync.Mutex
+	cond                       *sync.Cond
+	config                     Config
+	tools                      map[string]tool.Definition
+	policies                   map[string]effectivePolicy
+	records                    map[string]*record
+	workflows                  map[string]*workflow
+	tenants                    map[string]*tenantState
+	tenantOrder                []string
+	rrCursor                   int
+	queue                      []*record
+	terminal                   []terminalGroup
+	terminalCount              int
+	pending                    int
+	running                    int
+	reservedSandboxCPUMilli    int
+	reservedSandboxMemoryBytes int64
+	closing                    bool
+	halted                     bool
+	expiry                     chan struct{}
+	stop                       chan struct{}
+	done                       chan struct{}
+	workers                    sync.WaitGroup
 }
 
 // NewManager freezes the registry and starts a fixed worker pool plus one queue
@@ -297,6 +317,7 @@ type preparedRequest struct {
 	queueTimeout time.Duration
 	runTimeout   time.Duration
 	outputLimit  int
+	resources    tool.Resources
 }
 
 func (m *Manager) prepareRequest(ctx context.Context, req Request) (preparedRequest, error) {
@@ -315,6 +336,10 @@ func (m *Manager) prepareRequest(ctx context.Context, req Request) (preparedRequ
 	def, ok := m.tools[req.Tool]
 	if !ok {
 		return preparedRequest{}, fmt.Errorf("unknown tool %q", req.Tool)
+	}
+	if def.Resources.CPUMilli > m.config.SandboxMaxCPUMilli || def.Resources.MemoryBytes > m.config.SandboxMaxMemoryBytes ||
+		def.Resources.CPUMilli > m.config.SandboxCPUBudgetMilli || def.Resources.MemoryBytes > m.config.SandboxMemoryBudgetBytes {
+		return preparedRequest{}, ErrSandboxBudgetExceeded
 	}
 	policy := m.policies[req.Tool]
 	queueTimeout, err := resolveTimeout(req.QueueTimeout, policy.defaultQueueTimeout, policy.maxQueueTimeout)
@@ -339,7 +364,7 @@ func (m *Manager) prepareRequest(ctx context.Context, req Request) (preparedRequ
 	if err := def.Validate(arguments); err != nil {
 		return preparedRequest{}, fmt.Errorf("invalid tool arguments: %w", err)
 	}
-	return preparedRequest{request: req, arguments: arguments, policy: policy, queueTimeout: queueTimeout, runTimeout: runTimeout, outputLimit: outputLimit}, nil
+	return preparedRequest{request: req, arguments: arguments, policy: policy, queueTimeout: queueTimeout, runTimeout: runTimeout, outputLimit: outputLimit, resources: def.Resources}, nil
 }
 
 func (m *Manager) admissionError(ctx context.Context) error {
@@ -378,6 +403,8 @@ func (p preparedRequest) makeRecord(id, workflowID, nodeID string, now time.Time
 		OutputLimitBytes:   p.outputLimit,
 		ArgumentLimitBytes: p.policy.maxArgumentBytes,
 		ResultLimitBytes:   p.policy.maxResultBytes,
+		SandboxCPUMilli:    p.resources.CPUMilli,
+		SandboxMemoryBytes: p.resources.MemoryBytes,
 	}, arguments: p.arguments, deadline: now.Add(p.queueTimeout)}
 }
 
@@ -447,7 +474,7 @@ func (m *Manager) Cancel(id string) (Snapshot, error) {
 func (m *Manager) Stats() Stats {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return Stats{Queued: len(m.queue), Blocked: m.pending - len(m.queue), Pending: m.pending, Running: m.running, Stored: len(m.records), Tenants: len(m.tenants), Halted: m.halted}
+	return Stats{Queued: len(m.queue), Blocked: m.pending - len(m.queue), Pending: m.pending, Running: m.running, Stored: len(m.records), Tenants: len(m.tenants), Halted: m.halted, ReservedSandboxCPUMilli: m.reservedSandboxCPUMilli, ReservedSandboxMemoryBytes: m.reservedSandboxMemoryBytes}
 }
 
 // Close stops admission, cancels accepted work, and waits for all owned

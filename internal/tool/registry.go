@@ -17,6 +17,22 @@ type RunOptions struct {
 	MaxOutputBytes   int
 	OnOutputLimit    func()
 	OnProcessStarted func(time.Time)
+	SandboxResources Resources
+}
+
+// Resources is a server-owned sandbox reservation. Zero means the tool does
+// not reserve sandbox CPU or memory (for example, Mock or trusted Process).
+// Nonzero reservations require both fields to be positive.
+type Resources struct {
+	CPUMilli    int
+	MemoryBytes int64
+}
+
+func (r Resources) Validate() error {
+	if r.CPUMilli < 0 || r.MemoryBytes < 0 || (r.CPUMilli == 0) != (r.MemoryBytes == 0) {
+		return errors.New("sandbox CPU and memory reservations must both be positive or both zero")
+	}
+	return nil
 }
 
 // Outcome reports executor facts. The execution manager alone decides the
@@ -84,10 +100,11 @@ func (p Policy) validate() error {
 // Execute must return only after its work has stopped when its context is
 // cancelled.
 type Definition struct {
-	Name     string
-	Policy   Policy
-	Validate func(json.RawMessage) error
-	Execute  func(context.Context, json.RawMessage, RunOptions) (Outcome, error)
+	Name      string
+	Policy    Policy
+	Resources Resources
+	Validate  func(json.RawMessage) error
+	Execute   func(context.Context, json.RawMessage, RunOptions) (Outcome, error)
 }
 
 // Registry stores explicit tool registrations. A Manager takes a snapshot of
@@ -111,6 +128,9 @@ func (r *Registry) Register(def Definition) error {
 		return errors.New("tool requires name, validator and executor")
 	}
 	if err := def.Policy.validate(); err != nil {
+		return fmt.Errorf("tool %q: %w", def.Name, err)
+	}
+	if err := def.Resources.Validate(); err != nil {
 		return fmt.Errorf("tool %q: %w", def.Name, err)
 	}
 	r.mu.Lock()
