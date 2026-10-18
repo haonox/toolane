@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/haonox/toolane/internal/execution"
 	"github.com/haonox/toolane/internal/tool"
 )
 
@@ -209,5 +210,48 @@ func TestBackendUnreachableDuringCleanupRequiresStopConfirmation(t *testing.T) {
 	var runErr *tool.RunError
 	if !errors.As(err, &runErr) || runErr.Code != "sandbox_stop_unconfirmed" || !out.StopUnconfirmed || out.CleanupStatus != "failed" {
 		t.Fatalf("unreachable runtime released stop confirmation: outcome=%+v err=%v", out, err)
+	}
+}
+
+func TestDockerUnreachableKeepsManagerReservation(t *testing.T) {
+	s := testSpec(t)
+	f := &fakeCLI{info: secureInfo(s), inspectErr: errors.New("daemon unreachable")}
+	def, err := scriptDefinition("shell", s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := tool.NewRegistry()
+	if err := registry.Register(def); err != nil {
+		t.Fatal(err)
+	}
+	m, err := execution.NewManager(execution.DefaultConfig(), registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := m.Submit(context.Background(), execution.Request{Tool: "shell", Arguments: json.RawMessage(`{"script":"echo hello"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for !m.Stats().Halted {
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatal("manager did not halt after Docker stop became unconfirmed")
+		}
+	}
+	snapshot, err := m.Get(initial.ID)
+	if err != nil || snapshot.State != execution.Cancelling || snapshot.CleanupStatus != "failed" {
+		t.Fatalf("unconfirmed Docker stop snapshot: %+v err=%v", snapshot, err)
+	}
+	stats := m.Stats()
+	if stats.Running != 1 || stats.ReservedSandboxCPUMilli != 1000 || stats.ReservedSandboxMemoryBytes != defaultMemoryBytes {
+		t.Fatalf("Docker stop uncertainty released reservation: %+v", stats)
+	}
+	if err := m.Close(context.Background()); !errors.Is(err, execution.ErrStopUnconfirmed) {
+		t.Fatalf("manager close error = %v", err)
 	}
 }
