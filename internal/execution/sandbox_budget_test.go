@@ -194,3 +194,32 @@ func TestSandboxStopUnconfirmedKeepsReservation(t *testing.T) {
 		t.Fatalf("close error = %v", err)
 	}
 }
+
+func TestCleanupRetryUpdatesTerminalSnapshot(t *testing.T) {
+	updates := make(chan func(string, string), 1)
+	registry := tool.NewRegistry()
+	if err := registry.Register(tool.Definition{
+		Name: "cleanup", Resources: tool.Resources{CPUMilli: 1000, MemoryBytes: 256 * mib},
+		Validate: func(json.RawMessage) error { return nil },
+		Execute: func(_ context.Context, _ json.RawMessage, options tool.RunOptions) (tool.Outcome, error) {
+			updates <- options.OnCleanupUpdate
+			return tool.Outcome{CleanupStatus: "pending", CleanupError: "remove unavailable"}, nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := NewManager(DefaultConfig(), registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close(context.Background()) })
+	s := submit(t, m, Request{Tool: "cleanup"})
+	awaitState(t, m, s.ID, Succeeded)
+	if snap, err := m.Get(s.ID); err != nil || snap.CleanupStatus != "pending" || snap.CleanupError == "" {
+		t.Fatalf("pending cleanup not exposed: %+v %v", snap, err)
+	}
+	(<-updates)("succeeded", "")
+	if snap, err := m.Get(s.ID); err != nil || snap.CleanupStatus != "succeeded" || snap.CleanupError != "" {
+		t.Fatalf("cleanup retry not reflected: %+v %v", snap, err)
+	}
+}

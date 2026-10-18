@@ -62,6 +62,7 @@ type fakeCLI struct {
 	attached   bool
 	removed    bool
 	removeErr  error
+	inspectErr error
 }
 
 func (f *fakeCLI) run(_ context.Context, args ...string) (string, error) {
@@ -72,10 +73,15 @@ func (f *fakeCLI) run(_ context.Context, args ...string) (string, error) {
 		return `["name=seccomp,profile=builtin"]`, nil
 	case "image inspect":
 		return f.info.Image, nil
+	case "container ls":
+		return "", nil
 	case "container create":
 		f.createArgs = append([]string(nil), args...)
 		return f.info.ID, nil
 	case "container inspect":
+		if f.inspectErr != nil {
+			return "", f.inspectErr
+		}
 		encoded, _ := json.Marshal(f.info)
 		return string(encoded), nil
 	case "container rm":
@@ -159,5 +165,49 @@ func TestRemovalFailureIsSeparateFromExecutionResult(t *testing.T) {
 	out, err := def.Execute(context.Background(), json.RawMessage(`{"script":"echo hello"}`), testOptions(s))
 	if err != nil || out.Stdout != "hello" || out.CleanupStatus != "failed" || out.CleanupError == "" || out.StopUnconfirmed {
 		t.Fatalf("execution and cleanup conflated: outcome=%+v err=%v", out, err)
+	}
+}
+
+func TestBackendTracksFailedRemovalForRetry(t *testing.T) {
+	s := testSpec(t)
+	f := &fakeCLI{info: secureInfo(s), removeErr: errors.New("remove denied")}
+	b := newBackend(s, f)
+	b.retryInterval = time.Millisecond
+	b.maxRetries = 1
+	def, err := b.Definition("shell")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates := make(chan string, 1)
+	options := testOptions(s)
+	options.OnCleanupUpdate = func(status, _ string) { updates <- status }
+	out, err := def.Execute(context.Background(), json.RawMessage(`{"script":"echo hello"}`), options)
+	if err != nil || out.CleanupStatus != "pending" || out.CleanupError == "" {
+		t.Fatalf("failed deletion not marked pending: outcome=%+v err=%v", out, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := b.Close(ctx); err == nil {
+		t.Fatal("permanent deletion failure was hidden")
+	}
+	if got := <-updates; got != "failed" {
+		t.Fatalf("cleanup callback = %q, want failed", got)
+	}
+	if pending, _, _ := b.RecoveryStatus(); pending != 1 {
+		t.Fatalf("residual ownership lost: pending=%d", pending)
+	}
+}
+
+func TestBackendUnreachableDuringCleanupRequiresStopConfirmation(t *testing.T) {
+	s := testSpec(t)
+	f := &fakeCLI{info: secureInfo(s), inspectErr: errors.New("daemon unreachable")}
+	def, err := scriptDefinition("shell", s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := def.Execute(context.Background(), json.RawMessage(`{"script":"echo hello"}`), testOptions(s))
+	var runErr *tool.RunError
+	if !errors.As(err, &runErr) || runErr.Code != "sandbox_stop_unconfirmed" || !out.StopUnconfirmed || out.CleanupStatus != "failed" {
+		t.Fatalf("unreachable runtime released stop confirmation: outcome=%+v err=%v", out, err)
 	}
 }

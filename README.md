@@ -8,7 +8,7 @@ Toolane 负责接收工具任务、限制并发、组织显式依赖、管理执
 
 > V0.1 的单机闭环已可运行，Linux 自动化验收覆盖 ACC-01～07。V0.2 的 DAG、进程内模拟租户配额、轮询调度与 FIFO 对比实验已实现，ACC-08～10 自动化验收通过。
 
-V0.3 已接入沙箱 CPU/内存的调度预留，并提供固定镜像的 Docker Shell Executor；真实容器测试覆盖隔离、非零退出、输出洪泛和超时。后台残留回收与完整阶段验收仍待后续批次。
+V0.3 已接入沙箱 CPU/内存的调度预留、固定镜像的 Docker Shell Executor 和按实例归属的有界残留回收。真实容器测试覆盖隔离、非零退出、输出洪泛、超时、OOM 与重启残留回收；完整阶段验收仍待最后收尾。
 
 ## 项目目标
 
@@ -56,7 +56,7 @@ go test -race ./...
 go vet ./...
 ```
 
-演示提供 `mock.delay` 与 `process.printf`；调用方也可在服务端注册其他可信工具或 Docker Shell 工具。V0.2 的租户 ID 只由可信进程内调用方提供，不构成身份认证；可配置 `SchedulerFIFO` 作为实验基线。执行状态和结果仅保存在内存，进程退出后丢失；尚无 HTTP 或持久化。Docker 仅面向 Linux 主机；异常退出后的残留容器后台回收尚未实现。Process Executor 与真实进程测试也以 Linux 为目标；其他平台会返回 `process_unsupported`。
+演示提供 `mock.delay` 与 `process.printf`；调用方也可在服务端注册其他可信工具或 Docker Shell 工具。V0.2 的租户 ID 只由可信进程内调用方提供，不构成身份认证；可配置 `SchedulerFIFO` 作为实验基线。执行状态和结果仅保存在内存，进程退出后丢失；尚无 HTTP 或持久化。Docker 仅面向 Linux 主机；服务启动时可按实例标签回收残留容器，删除失败会有界重试，调用方须保存稳定实例 ID 并在准入前调用恢复接口。Process Executor 与真实进程测试也以 Linux 为目标；其他平台会返回 `process_unsupported`。
 
 ## 项目边界
 
@@ -77,6 +77,7 @@ Process Executor 只运行可信工具；Docker 版本针对常见资源滥用�
 | [docs/V0.2-ACCEPTANCE.md](./docs/V0.2-ACCEPTANCE.md) | V0.2 阶段验收命令、证据与边界 |
 | [docs/V0.3-RESOURCE-BUDGET.md](./docs/V0.3-RESOURCE-BUDGET.md) | V0.3 第一批的沙箱资源准入语义与验证范围 |
 | [docs/V0.3-DOCKER-EXECUTOR.md](./docs/V0.3-DOCKER-EXECUTOR.md) | V0.3 Docker Executor 策略、进程内接入、真实容器测试与限制 |
+| [docs/V0.3-RECOVERY.md](./docs/V0.3-RECOVERY.md) | V0.3 残留回收、故障隔离与启动顺序 |
 
 **协作 AI 开始工作前须读取上述两份文档与本 README。** 未指定阶段时只开发 V0.1；不要提前实现整条路线。
 

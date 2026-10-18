@@ -3,6 +3,7 @@ package docker
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -18,12 +19,33 @@ type dockerCLI interface {
 
 type commandCLI struct{ binary string }
 
+const maxDockerControlOutputBytes = 1024 * 1024
+
+type boundedBuffer struct {
+	bytes.Buffer
+	overflow bool
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	remaining := maxDockerControlOutputBytes - b.Len()
+	if len(p) > remaining {
+		b.overflow = true
+		b.Buffer.Write(p[:remaining])
+		return len(p), nil
+	}
+	return b.Buffer.Write(p)
+}
+
 func (c commandCLI) run(ctx context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, c.binary, args...)
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr boundedBuffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	if stdout.overflow || stderr.overflow {
+		return "", errors.New("Docker control output exceeded 1 MiB limit")
+	}
+	if err != nil {
 		message := strings.TrimSpace(stderr.String())
 		if message != "" {
 			return "", fmt.Errorf("docker %s: %w: %s", strings.Join(args[:min(2, len(args))], " "), err, message)

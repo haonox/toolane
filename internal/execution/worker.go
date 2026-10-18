@@ -22,6 +22,7 @@ func (m *Manager) worker() {
 			MaxOutputBytes:   r.snapshot.OutputLimitBytes,
 			OnOutputLimit:    func() { m.outputLimitReached(r) },
 			OnProcessStarted: func(at time.Time) { m.processStarted(r, at) },
+			OnCleanupUpdate:  func(status, message string) { m.cleanupUpdated(r, status, message) },
 			SandboxResources: tool.Resources{CPUMilli: r.snapshot.SandboxCPUMilli, MemoryBytes: r.snapshot.SandboxMemoryBytes},
 			ExecutionID:      r.snapshot.ID,
 		}
@@ -115,6 +116,16 @@ func (m *Manager) processStarted(r *record, at time.Time) {
 	}
 }
 
+func (m *Manager) cleanupUpdated(r *record, status, message string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if status != "succeeded" && status != "failed" {
+		return
+	}
+	r.snapshot.CleanupStatus = status
+	r.snapshot.CleanupError = m.limitErrorMessage(message)
+}
+
 func (m *Manager) complete(r *record, ctx context.Context, outcome tool.Outcome, err error) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -136,10 +147,11 @@ func (m *Manager) complete(r *record, ctx context.Context, outcome tool.Outcome,
 	}
 	r.snapshot.Stdout = strings.ToValidUTF8(stdout, "?")
 	r.snapshot.Stderr = strings.ToValidUTF8(stderr, "?")
-	if outcome.CleanupStatus != "" {
+	cleanupFinalized := outcome.CleanupStatus == "pending" && (r.snapshot.CleanupStatus == "succeeded" || r.snapshot.CleanupStatus == "failed")
+	if outcome.CleanupStatus != "" && !cleanupFinalized {
 		r.snapshot.CleanupStatus = outcome.CleanupStatus
 	}
-	if outcome.CleanupError != "" {
+	if outcome.CleanupError != "" && !cleanupFinalized {
 		r.snapshot.CleanupError = m.limitErrorMessage(outcome.CleanupError)
 	}
 	if outcome.StopUnconfirmed {
