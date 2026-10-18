@@ -26,6 +26,10 @@ var (
 	ErrAgentIDTooLarge = errors.New("agent ID exceeds limit")
 	// ErrArgumentsTooLarge indicates that tool arguments exceed their byte limit.
 	ErrArgumentsTooLarge = errors.New("tool arguments exceed limit")
+	// ErrTenantIDTooLarge indicates that a tenant ID exceeds its byte limit.
+	ErrTenantIDTooLarge = errors.New("tenant ID exceeds limit")
+	// ErrTenantQueueFull indicates that a tenant's pending capacity is exhausted.
+	ErrTenantQueueFull = errors.New("tenant pending queue full")
 	// ErrBackendUnavailable indicates that new work is paused after an unconfirmed stop.
 	ErrBackendUnavailable = errors.New("execution backend unavailable")
 	// ErrStopUnconfirmed indicates that shutdown could not confirm all work stopped.
@@ -34,6 +38,15 @@ var (
 
 // State describes the public execution lifecycle.
 type State string
+
+// SchedulerMode selects how ready tasks are claimed. RoundRobin is the V0.2
+// default; FIFO remains available for controlled comparisons.
+type SchedulerMode string
+
+const (
+	SchedulerRoundRobin SchedulerMode = "round_robin"
+	SchedulerFIFO       SchedulerMode = "fifo"
+)
 
 const (
 	Blocked    State = "blocked"
@@ -52,6 +65,10 @@ const (
 type Config struct {
 	Workers              int
 	QueueCapacity        int
+	TenantRunningLimit   int
+	TenantPendingLimit   int
+	MaxTenantIDBytes     int
+	Scheduler            SchedulerMode
 	RetainedResults      int
 	MaxWorkflowNodes     int
 	MaxWorkflowBytes     int
@@ -71,6 +88,10 @@ func DefaultConfig() Config {
 	return Config{
 		Workers:              4,
 		QueueCapacity:        256,
+		TenantRunningLimit:   2,
+		TenantPendingLimit:   64,
+		MaxTenantIDBytes:     256,
+		Scheduler:            SchedulerRoundRobin,
 		RetainedResults:      1000,
 		MaxWorkflowNodes:     64,
 		MaxWorkflowBytes:     256 * 1024,
@@ -87,8 +108,14 @@ func DefaultConfig() Config {
 }
 
 func (c Config) validate() error {
-	if c.Workers <= 0 || c.QueueCapacity <= 0 || c.RetainedResults <= 0 || c.MaxWorkflowNodes <= 0 || c.MaxWorkflowBytes <= 0 || c.MaxResultBytes <= 0 || c.MaxArgumentBytes <= 0 || c.MaxOutputBytes <= 0 || c.MaxAgentIDBytes <= 0 || c.MaxErrorMessageBytes <= 0 {
-		return errors.New("workers, queue capacity, retained results and byte limits must be positive")
+	if c.Workers <= 0 || c.QueueCapacity <= 0 || c.TenantRunningLimit <= 0 || c.TenantPendingLimit <= 0 || c.MaxTenantIDBytes <= 0 || c.RetainedResults <= 0 || c.MaxWorkflowNodes <= 0 || c.MaxWorkflowBytes <= 0 || c.MaxResultBytes <= 0 || c.MaxArgumentBytes <= 0 || c.MaxOutputBytes <= 0 || c.MaxAgentIDBytes <= 0 || c.MaxErrorMessageBytes <= 0 {
+		return errors.New("workers, global and tenant capacities, retained results and byte limits must be positive")
+	}
+	if c.MaxTenantIDBytes < len("local") {
+		return errors.New("tenant ID byte limit must allow the local tenant")
+	}
+	if c.Scheduler != SchedulerRoundRobin && c.Scheduler != SchedulerFIFO {
+		return errors.New("invalid scheduler mode")
 	}
 	if c.DefaultQueueTimeout <= 0 || c.MaxQueueTimeout < c.DefaultQueueTimeout ||
 		c.DefaultRunTimeout <= 0 || c.MaxRunTimeout < c.DefaultRunTimeout {
@@ -101,6 +128,7 @@ func (c Config) validate() error {
 // cancelled Submit context prevents admission but does not own an accepted
 // execution's lifetime.
 type Request struct {
+	TenantID         string
 	AgentID          string
 	Tool             string
 	Arguments        json.RawMessage
@@ -144,6 +172,7 @@ type record struct {
 	arguments  json.RawMessage
 	deadline   time.Time
 	cancel     context.CancelFunc
+	tenant     *tenantState
 	workflow   *workflow
 	dependsOn  []*record
 	dependents []*record
@@ -156,10 +185,11 @@ type Stats struct {
 	Pending int
 	Running int
 	Stored  int
+	Tenants int
 	Halted  bool
 }
 
-// Manager owns state transitions, the FIFO queue, worker slots, and
+// Manager owns state transitions, the ready queue, worker slots, and
 // cancellation. A running tool occupies a worker until Execute returns; an
 // executor must stop its work before returning after cancellation.
 type Manager struct {
@@ -170,6 +200,9 @@ type Manager struct {
 	policies      map[string]effectivePolicy
 	records       map[string]*record
 	workflows     map[string]*workflow
+	tenants       map[string]*tenantState
+	tenantOrder   []string
+	rrCursor      int
 	queue         []*record
 	terminal      []terminalGroup
 	terminalCount int
@@ -207,6 +240,7 @@ func NewManager(config Config, registry *tool.Registry) (*Manager, error) {
 		policies:  policies,
 		records:   make(map[string]*record),
 		workflows: make(map[string]*workflow),
+		tenants:   make(map[string]*tenantState),
 		expiry:    make(chan struct{}, 1),
 		stop:      make(chan struct{}),
 		done:      make(chan struct{}),
@@ -243,11 +277,14 @@ func (m *Manager) Submit(ctx context.Context, req Request) (Snapshot, error) {
 	if m.pending >= m.config.QueueCapacity {
 		return Snapshot{}, ErrQueueFull
 	}
+	if state := m.tenants[prepared.request.TenantID]; state != nil && state.pending >= m.config.TenantPendingLimit {
+		return Snapshot{}, ErrTenantQueueFull
+	}
 	now := time.Now().UTC()
 	r := prepared.makeRecord(id, "", "", now, true)
 	m.records[id] = r
 	m.queue = append(m.queue, r)
-	m.pending++
+	m.admitPendingLocked(r)
 	m.cond.Signal()
 	m.wakeExpiry()
 	return cloneSnapshot(r.snapshot), nil
@@ -265,6 +302,12 @@ type preparedRequest struct {
 func (m *Manager) prepareRequest(ctx context.Context, req Request) (preparedRequest, error) {
 	if err := ctx.Err(); err != nil {
 		return preparedRequest{}, err
+	}
+	if len(req.TenantID) > m.config.MaxTenantIDBytes {
+		return preparedRequest{}, ErrTenantIDTooLarge
+	}
+	if req.TenantID == "" {
+		req.TenantID = "local"
 	}
 	if len(req.AgentID) > m.config.MaxAgentIDBytes {
 		return preparedRequest{}, ErrAgentIDTooLarge
@@ -321,7 +364,7 @@ func (p preparedRequest) makeRecord(id, workflowID, nodeID string, now time.Time
 	}
 	return &record{snapshot: Snapshot{
 		ID:                 id,
-		TenantID:           "local",
+		TenantID:           p.request.TenantID,
 		AgentID:            p.request.AgentID,
 		Tool:               p.request.Tool,
 		WorkflowID:         workflowID,
@@ -379,12 +422,12 @@ func (m *Manager) Cancel(id string) (Snapshot, error) {
 	var cancel context.CancelFunc
 	switch r.snapshot.State {
 	case Blocked:
-		m.pending--
+		m.releasePendingLocked(r)
 		m.finishLocked(r, Cancelled, "cancelled", "cancelled before execution")
 		m.wakeExpiry()
 	case Queued:
 		m.removeQueued(r)
-		m.pending--
+		m.releasePendingLocked(r)
 		m.finishLocked(r, Cancelled, "cancelled", "cancelled before execution")
 		m.wakeExpiry()
 	case Running:
@@ -404,7 +447,7 @@ func (m *Manager) Cancel(id string) (Snapshot, error) {
 func (m *Manager) Stats() Stats {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return Stats{Queued: len(m.queue), Blocked: m.pending - len(m.queue), Pending: m.pending, Running: m.running, Stored: len(m.records), Halted: m.halted}
+	return Stats{Queued: len(m.queue), Blocked: m.pending - len(m.queue), Pending: m.pending, Running: m.running, Stored: len(m.records), Tenants: len(m.tenants), Halted: m.halted}
 }
 
 // Close stops admission, cancels accepted work, and waits for all owned
@@ -425,12 +468,12 @@ func (m *Manager) Close(ctx context.Context) error {
 			r := m.queue[0]
 			m.queue[0] = nil
 			m.queue = m.queue[1:]
-			m.pending--
+			m.releasePendingLocked(r)
 			m.finishLocked(r, Cancelled, "cancelled", "manager closed before execution")
 		}
 		for _, r := range m.records {
 			if r.snapshot.State == Blocked {
-				m.pending--
+				m.releasePendingLocked(r)
 				m.finishLocked(r, Cancelled, "cancelled", "manager closed before execution")
 			}
 			if r.snapshot.State == Running {

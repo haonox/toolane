@@ -41,16 +41,14 @@ func (m *Manager) claim() (*record, context.Context, bool) {
 			m.cond.Wait()
 			continue
 		}
-		if len(m.queue) == 0 {
+		r := m.takeReadyLocked()
+		if r == nil {
 			m.cond.Wait()
 			continue
 		}
-		r := m.queue[0]
-		m.queue[0] = nil
-		m.queue = m.queue[1:]
-		m.pending--
 		m.wakeExpiry()
 		if !time.Now().Before(r.deadline) {
+			m.releasePendingLocked(r)
 			m.finishLocked(r, TimedOut, "queue_timeout", "queue wait expired")
 			continue
 		}
@@ -59,7 +57,7 @@ func (m *Manager) claim() (*record, context.Context, bool) {
 		r.snapshot.RunningAt = &now
 		ctx, cancel := context.WithTimeout(context.Background(), r.snapshot.ExecutionTimeout)
 		r.cancel = cancel
-		m.running++
+		m.claimSlotLocked(r)
 		// Another idle worker can claim the next accepted task.
 		if len(m.queue) > 0 {
 			m.cond.Signal()
@@ -181,7 +179,7 @@ func (m *Manager) complete(r *record, ctx context.Context, outcome tool.Outcome,
 		r.snapshot.Result = append(json.RawMessage(nil), outcome.Result...)
 		m.finishLocked(r, Succeeded, "", "")
 	}
-	m.running--
+	m.releaseRunningLocked(r)
 	return true
 }
 
@@ -205,7 +203,7 @@ func (m *Manager) expireQueued() {
 				if r.snapshot.State == Queued {
 					m.removeQueued(r)
 				}
-				m.pending--
+				m.releasePendingLocked(r)
 				m.finishLocked(r, TimedOut, "queue_timeout", "queue wait expired")
 				continue
 			}
