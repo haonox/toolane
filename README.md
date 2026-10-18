@@ -6,7 +6,7 @@ Toolane 负责接收工具任务、限制并发、组织显式依赖、管理执
 
 项目名由 Tool 与 Lane 组合。GitHub 仓库名称：`toolane`。
 
-> V0.1 的单机闭环已可运行，Linux 自动化验收已覆盖 ACC-01～07。V0.2 正在分批实现：当前包含进程内 DAG 工作流，租户配额、公平调度及对比实验尚未实现。
+> V0.1 的单机闭环已可运行，Linux 自动化验收已覆盖 ACC-01～07。V0.2 的 DAG、进程内模拟租户配额与轮询调度已有实现和测试，FIFO 对比实验可复现；阶段确认仍待审查。
 
 ## 项目目标
 
@@ -36,7 +36,7 @@ go run ./cmd/toolane
 go run ./cmd/toolane process
 ```
 
-当前可在 Go 进程内注册工具并调用 `Submit`、`Get`、`Cancel` 和 `Close`。Manager 使用固定 Worker、有界 FIFO 队列与一个排队期限监视器；运行取消或超时后，等待 Executor 返回才释放槽位。默认限制为 4 个 Worker、256 个待启动任务、30 秒排队期限、10 秒执行期限、256 KiB 参数、64 KiB 结构化结果、stdout/stderr 共享 1 MiB 原始字节预算、256 字节 Agent ID、4 KiB 错误摘要，以及保留 1000 个终态记录。请求可在配置上限内收紧期限和输出预算。
+当前可在 Go 进程内注册工具并调用 `Submit`、`Get`、`Cancel` 和 `Close`。Manager 使用固定 Worker、有界待启动容量、默认按租户轮询的就绪调度与一个排队期限监视器；运行取消或超时后，等待 Executor 返回才释放槽位。默认限制为 4 个 Worker、256 个全局待启动任务、每租户 2 个运行槽位和 64 个待启动节点、30 秒排队期限、10 秒执行期限、256 KiB 参数、64 KiB 结构化结果、stdout/stderr 共享 1 MiB 原始字节预算、256 字节 Agent ID、4 KiB 错误摘要，以及保留 1000 个终态记录。请求可在配置上限内收紧期限和输出预算。
 
 进程内调用方现在也可以使用 `SubmitWorkflow`、`GetWorkflow` 和 `CancelWorkflow` 提交、查询和取消静态 DAG。工作流默认最多 64 个节点、请求编码最多 256 KiB。整批校验并接受；等待依赖的 `blocked` 节点与 `queued` 节点共同占用待启动容量，等待期限均从接受时起算。节点失败会跳过受影响的下游，独立分支继续执行。完成的工作流和全部节点作为一组淘汰，活动工作流的已完成节点保持可查询。接口与限制见 [V0.2 DAG 说明](./docs/V0.2-DAG.md)。
 
@@ -52,7 +52,7 @@ go test -race ./...
 go vet ./...
 ```
 
-演示提供 `mock.delay` 与 `process.printf`；调用方也可在服务端注册其他可信工具。执行状态和结果仅保存在内存，进程退出后丢失；尚无 Docker、HTTP、租户公平调度或持久化。Process Executor 与真实进程测试以 Linux 为目标；其他平台会返回 `process_unsupported`。
+演示提供 `mock.delay` 与 `process.printf`；调用方也可在服务端注册其他可信工具。V0.2 的租户 ID 只由可信进程内调用方提供，不构成身份认证；可配置 `SchedulerFIFO` 作为实验基线。执行状态和结果仅保存在内存，进程退出后丢失；尚无 Docker、HTTP 或持久化。Process Executor 与真实进程测试以 Linux 为目标；其他平台会返回 `process_unsupported`。
 
 ## 项目边界
 
@@ -69,6 +69,7 @@ Process Executor 只运行可信工具；Docker 版本针对常见资源滥用�
 | [docs/V0.1-ACCEPTANCE.md](./docs/V0.1-ACCEPTANCE.md) | V0.1 自动化验收范围、命令与限制 |
 | [doc/V0.1-TECHNICAL-REPORT.md](./doc/V0.1-TECHNICAL-REPORT.md) | 当前实现的架构、执行语义、代码审查路线与已知边界 |
 | [docs/V0.2-DAG.md](./docs/V0.2-DAG.md) | V0.2 第一批 DAG 接口、状态与验证范围 |
+| [docs/V0.2-SCHEDULER.md](./docs/V0.2-SCHEDULER.md) | 租户配额、轮询调度、测试与 FIFO 对比实验 |
 
 **协作 AI 开始工作前须读取上述两份文档与本 README。** 未指定阶段时只开发 V0.1；不要提前实现整条路线。
 

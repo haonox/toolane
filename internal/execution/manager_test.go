@@ -514,7 +514,7 @@ func TestUnconfirmedStopKeepsReservationAndHaltsAdmission(t *testing.T) {
 	if err != nil || active.State != Cancelling || active.FinishedAt != nil || active.CleanupStatus != "failed" || len(active.ErrorMessage) != 32 {
 		t.Fatalf("unconfirmed record: %+v, %v", active, err)
 	}
-	if stats := m.Stats(); stats.Running != 1 || !stats.Halted {
+	if stats := m.Stats(); stats.Running != 1 || stats.Tenants != 1 || !stats.Halted {
 		t.Fatalf("unconfirmed reservation was released: %+v", stats)
 	}
 	if _, err := m.Submit(context.Background(), Request{Tool: "uncertain"}); !errors.Is(err, ErrBackendUnavailable) {

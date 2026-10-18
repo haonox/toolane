@@ -24,12 +24,14 @@ type WorkflowNode struct {
 // WorkflowRequest submits a complete dependency graph. Arguments are fixed at
 // submission and never read from upstream results.
 type WorkflowRequest struct {
-	Nodes []WorkflowNode `json:"nodes"`
+	TenantID string         `json:"tenant_id,omitempty"`
+	Nodes    []WorkflowNode `json:"nodes"`
 }
 
 // WorkflowSnapshot reports the workflow summary and nodes in submission order.
 type WorkflowSnapshot struct {
 	ID         string     `json:"workflow_id"`
+	TenantID   string     `json:"tenant_id"`
 	State      State      `json:"status"`
 	Nodes      []Snapshot `json:"nodes"`
 	CreatedAt  time.Time  `json:"created_at"`
@@ -38,6 +40,7 @@ type WorkflowSnapshot struct {
 
 type workflow struct {
 	id         string
+	tenantID   string
 	state      State
 	nodes      []*record
 	createdAt  time.Time
@@ -62,7 +65,7 @@ func (m *Manager) SubmitWorkflow(ctx context.Context, req WorkflowRequest) (Work
 	ids := make([]string, len(req.Nodes))
 	for i, node := range req.Nodes {
 		prepared[i], err = m.prepareRequest(ctx, Request{
-			AgentID: node.AgentID, Tool: node.Tool, Arguments: node.Arguments,
+			TenantID: req.TenantID, AgentID: node.AgentID, Tool: node.Tool, Arguments: node.Arguments,
 			QueueTimeout: node.QueueTimeout, ExecutionTimeout: node.ExecutionTimeout,
 			OutputLimitBytes: node.OutputLimitBytes,
 		})
@@ -86,8 +89,16 @@ func (m *Manager) SubmitWorkflow(ctx context.Context, req WorkflowRequest) (Work
 	if len(req.Nodes) > m.config.QueueCapacity-m.pending {
 		return WorkflowSnapshot{}, ErrQueueFull
 	}
+	tenantID := prepared[0].request.TenantID
+	if state := m.tenants[tenantID]; state != nil {
+		if len(req.Nodes) > m.config.TenantPendingLimit-state.pending {
+			return WorkflowSnapshot{}, ErrTenantQueueFull
+		}
+	} else if len(req.Nodes) > m.config.TenantPendingLimit {
+		return WorkflowSnapshot{}, ErrTenantQueueFull
+	}
 	now := time.Now().UTC()
-	w := &workflow{id: workflowID, state: Running, createdAt: now, remaining: len(req.Nodes)}
+	w := &workflow{id: workflowID, tenantID: tenantID, state: Running, createdAt: now, remaining: len(req.Nodes)}
 	w.nodes = make([]*record, len(req.Nodes))
 	for i, node := range req.Nodes {
 		r := prepared[i].makeRecord(ids[i], workflowID, node.ID, now, len(dependencies[i]) == 0)
@@ -103,11 +114,11 @@ func (m *Manager) SubmitWorkflow(ctx context.Context, req WorkflowRequest) (Work
 	m.workflows[workflowID] = w
 	for _, r := range w.nodes {
 		m.records[r.snapshot.ID] = r
+		m.admitPendingLocked(r)
 		if r.snapshot.State == Queued {
 			m.queue = append(m.queue, r)
 		}
 	}
-	m.pending += len(w.nodes)
 	m.cond.Broadcast()
 	m.wakeExpiry()
 	return snapshotWorkflow(w), nil
@@ -118,7 +129,13 @@ func (m *Manager) validateWorkflow(req WorkflowRequest) ([][]int, error) {
 		return nil, fmt.Errorf("workflow must contain 1 to %d nodes", m.config.MaxWorkflowNodes)
 	}
 	// Bound raw input before JSON encoding can expand escaped strings.
-	size := 0
+	size := len(req.TenantID)
+	if size > m.config.MaxTenantIDBytes {
+		return nil, ErrTenantIDTooLarge
+	}
+	if size > m.config.MaxWorkflowBytes {
+		return nil, errors.New("workflow request exceeds size limit")
+	}
 	addSize := func(length int) error {
 		if length > m.config.MaxWorkflowBytes-size {
 			return errors.New("workflow request exceeds size limit")
@@ -229,11 +246,11 @@ func (m *Manager) CancelWorkflow(id string) (WorkflowSnapshot, error) {
 		for _, r := range w.nodes {
 			switch r.snapshot.State {
 			case Blocked:
-				m.pending--
+				m.releasePendingLocked(r)
 				m.finishLocked(r, Cancelled, "cancelled", "workflow cancelled before execution")
 			case Queued:
 				m.removeQueued(r)
-				m.pending--
+				m.releasePendingLocked(r)
 				m.finishLocked(r, Cancelled, "cancelled", "workflow cancelled before execution")
 			case Running:
 				r.snapshot.State = Cancelling
@@ -252,7 +269,7 @@ func (m *Manager) CancelWorkflow(id string) (WorkflowSnapshot, error) {
 }
 
 func snapshotWorkflow(w *workflow) WorkflowSnapshot {
-	s := WorkflowSnapshot{ID: w.id, State: w.state, CreatedAt: w.createdAt, Nodes: make([]Snapshot, len(w.nodes))}
+	s := WorkflowSnapshot{ID: w.id, TenantID: w.tenantID, State: w.state, CreatedAt: w.createdAt, Nodes: make([]Snapshot, len(w.nodes))}
 	if w.finishedAt != nil {
 		at := *w.finishedAt
 		s.FinishedAt = &at
@@ -272,7 +289,7 @@ func (m *Manager) workflowNodeFinishedLocked(r *record) {
 				continue
 			}
 			if r.snapshot.State != Succeeded {
-				m.pending--
+				m.releasePendingLocked(dependent)
 				m.finishLocked(dependent, Skipped, "dependency_failed", "dependency did not succeed")
 				continue
 			}
