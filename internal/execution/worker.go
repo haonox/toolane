@@ -48,6 +48,7 @@ func (m *Manager) claim() (*record, context.Context, bool) {
 		r := m.queue[0]
 		m.queue[0] = nil
 		m.queue = m.queue[1:]
+		m.pending--
 		m.wakeExpiry()
 		if !time.Now().Before(r.deadline) {
 			m.finishLocked(r, TimedOut, "queue_timeout", "queue wait expired")
@@ -196,19 +197,21 @@ func (m *Manager) expireQueued() {
 		}
 		now := time.Now()
 		var next time.Time
-		for i := 0; i < len(m.queue); {
-			r := m.queue[i]
+		for _, r := range m.records {
+			if r.snapshot.State != Queued && r.snapshot.State != Blocked {
+				continue
+			}
 			if !now.Before(r.deadline) {
-				copy(m.queue[i:], m.queue[i+1:])
-				m.queue[len(m.queue)-1] = nil
-				m.queue = m.queue[:len(m.queue)-1]
+				if r.snapshot.State == Queued {
+					m.removeQueued(r)
+				}
+				m.pending--
 				m.finishLocked(r, TimedOut, "queue_timeout", "queue wait expired")
 				continue
 			}
 			if next.IsZero() || r.deadline.Before(next) {
 				next = r.deadline
 			}
-			i++
 		}
 		m.mu.Unlock()
 		if next.IsZero() {

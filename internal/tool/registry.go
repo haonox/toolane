@@ -1,3 +1,4 @@
+// Package tool defines the contracts and registry for server-owned tools.
 package tool
 
 import (
@@ -9,15 +10,17 @@ import (
 	"time"
 )
 
-// RunOptions are effective limits owned by the manager. OnOutputLimit must be
-// called synchronously when the shared output budget is reached.
+// RunOptions contains effective limits and lifecycle callbacks supplied by the
+// execution manager. OnOutputLimit must be called synchronously when the shared
+// output budget is reached.
 type RunOptions struct {
 	MaxOutputBytes   int
 	OnOutputLimit    func()
 	OnProcessStarted func(time.Time)
 }
 
-// Outcome contains executor facts. The manager alone decides the final state.
+// Outcome reports executor facts. The execution manager alone decides the
+// final execution state.
 type Outcome struct {
 	Result           json.RawMessage
 	Stdout           string
@@ -28,8 +31,8 @@ type Outcome struct {
 	StopUnconfirmed  bool
 }
 
-// RunError gives a stable code for an executor failure without making the
-// manager depend on a particular backend package.
+// RunError gives an executor failure a stable code without coupling the
+// execution manager to a specific backend package.
 type RunError struct {
 	Code string
 	Err  error
@@ -52,8 +55,7 @@ func (e *RunError) Unwrap() error {
 }
 
 // Policy narrows the manager's global limits for one registered tool. Zero
-// values inherit the global limit or default. A tool maximum cannot exceed
-// the corresponding manager maximum.
+// values inherit the corresponding global limit or default.
 type Policy struct {
 	DefaultQueueTimeout time.Duration
 	MaxQueueTimeout     time.Duration
@@ -78,8 +80,9 @@ func (p Policy) validate() error {
 	return nil
 }
 
-// Definition is a server-owned tool. Validate runs before admission; Execute
-// must return only after its work has stopped when its context is cancelled.
+// Definition describes a server-owned tool. Validate runs before admission.
+// Execute must return only after its work has stopped when its context is
+// cancelled.
 type Definition struct {
 	Name     string
 	Policy   Policy
@@ -94,11 +97,12 @@ type Registry struct {
 	tools map[string]Definition
 }
 
+// NewRegistry returns an empty tool registry.
 func NewRegistry() *Registry {
 	return &Registry{tools: make(map[string]Definition)}
 }
 
-// Register rejects incomplete or duplicate definitions.
+// Register rejects incomplete, invalid, or duplicate tool definitions.
 func (r *Registry) Register(def Definition) error {
 	if r == nil {
 		return errors.New("nil registry")
@@ -118,7 +122,7 @@ func (r *Registry) Register(def Definition) error {
 	return nil
 }
 
-// Snapshot returns an independent map of registered definitions.
+// Snapshot returns an independent map of the currently registered definitions.
 func (r *Registry) Snapshot() map[string]Definition {
 	if r == nil {
 		return nil

@@ -1,3 +1,4 @@
+// Package mock provides a deterministic tool for demos and execution tests.
 package mock
 
 import (
