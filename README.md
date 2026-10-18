@@ -12,6 +12,8 @@ V0.3 已接入沙箱 CPU/内存的调度预留、固定镜像的 Docker Shell Ex
 
 V1.0 的第一批增加了 [SQLite 存储基础](./docs/V1.0-SQLITE-FOUNDATION.md)：独占状态目录、版本化 schema，以及任务状态和事件的事务写入。Manager 尚未接入该存储，当前运行的任务仍是进程内状态。
 
+第二批增加了 [存储层幂等准入](./docs/V1.0-IDEMPOTENCY.md)：同一租户、提交端点和键的并发重复提交只创建一条任务记录；请求不同则冲突，24 小时后可重用键。Manager 与 HTTP 接口尚未接入，因此当前运行路径仍不提供提交幂等。
+
 ## 项目目标
 
 - **调度**：有界队列、并发配额、DAG 依赖与租户公平调度。
@@ -82,6 +84,7 @@ Process Executor 只运行可信工具；Docker 版本针对常见资源滥用�
 | [docs/V0.3-RECOVERY.md](./docs/V0.3-RECOVERY.md) | V0.3 残留回收、故障隔离与启动顺序 |
 | [docs/V0.3-ACCEPTANCE.md](./docs/V0.3-ACCEPTANCE.md) | V0.3 阶段验收证据与边界 |
 | [docs/V1.0-SQLITE-FOUNDATION.md](./docs/V1.0-SQLITE-FOUNDATION.md) | SQLite 驱动选择、Schema v1、事务边界与测试 |
+| [docs/V1.0-IDEMPOTENCY.md](./docs/V1.0-IDEMPOTENCY.md) | Schema v2、事务化幂等准入及验证范围 |
 
 **协作 AI 开始工作前须读取上述两份文档与本 README。** 未指定阶段时只开发 V0.1；不要提前实现整条路线。
 
