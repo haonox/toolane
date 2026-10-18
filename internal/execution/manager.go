@@ -36,6 +36,7 @@ var (
 type State string
 
 const (
+	Blocked    State = "blocked"
 	Queued     State = "queued"
 	Running    State = "running"
 	Cancelling State = "cancelling"
@@ -43,6 +44,7 @@ const (
 	Failed     State = "failed"
 	TimedOut   State = "timed_out"
 	Cancelled  State = "cancelled"
+	Skipped    State = "skipped"
 )
 
 // Config bounds active work and retained results. Use DefaultConfig as a
@@ -51,6 +53,8 @@ type Config struct {
 	Workers              int
 	QueueCapacity        int
 	RetainedResults      int
+	MaxWorkflowNodes     int
+	MaxWorkflowBytes     int
 	DefaultQueueTimeout  time.Duration
 	MaxQueueTimeout      time.Duration
 	DefaultRunTimeout    time.Duration
@@ -68,6 +72,8 @@ func DefaultConfig() Config {
 		Workers:              4,
 		QueueCapacity:        256,
 		RetainedResults:      1000,
+		MaxWorkflowNodes:     64,
+		MaxWorkflowBytes:     256 * 1024,
 		DefaultQueueTimeout:  30 * time.Second,
 		MaxQueueTimeout:      300 * time.Second,
 		DefaultRunTimeout:    10 * time.Second,
@@ -81,7 +87,7 @@ func DefaultConfig() Config {
 }
 
 func (c Config) validate() error {
-	if c.Workers <= 0 || c.QueueCapacity <= 0 || c.RetainedResults <= 0 || c.MaxResultBytes <= 0 || c.MaxArgumentBytes <= 0 || c.MaxOutputBytes <= 0 || c.MaxAgentIDBytes <= 0 || c.MaxErrorMessageBytes <= 0 {
+	if c.Workers <= 0 || c.QueueCapacity <= 0 || c.RetainedResults <= 0 || c.MaxWorkflowNodes <= 0 || c.MaxWorkflowBytes <= 0 || c.MaxResultBytes <= 0 || c.MaxArgumentBytes <= 0 || c.MaxOutputBytes <= 0 || c.MaxAgentIDBytes <= 0 || c.MaxErrorMessageBytes <= 0 {
 		return errors.New("workers, queue capacity, retained results and byte limits must be positive")
 	}
 	if c.DefaultQueueTimeout <= 0 || c.MaxQueueTimeout < c.DefaultQueueTimeout ||
@@ -109,6 +115,8 @@ type Snapshot struct {
 	TenantID           string          `json:"tenant_id"`
 	AgentID            string          `json:"agent_id,omitempty"`
 	Tool               string          `json:"tool"`
+	WorkflowID         string          `json:"workflow_id,omitempty"`
+	NodeID             string          `json:"node_id,omitempty"`
 	State              State           `json:"status"`
 	ErrorCode          string          `json:"error_code,omitempty"`
 	ErrorMessage       string          `json:"error_message,omitempty"`
@@ -120,7 +128,7 @@ type Snapshot struct {
 	ExitCode           *int            `json:"exit_code,omitempty"`
 	OutputTruncated    bool            `json:"output_truncated"`
 	CreatedAt          time.Time       `json:"created_at"`
-	ReadyAt            time.Time       `json:"ready_at"`
+	ReadyAt            *time.Time      `json:"ready_at,omitempty"`
 	RunningAt          *time.Time      `json:"running_at,omitempty"`
 	FinishedAt         *time.Time      `json:"finished_at,omitempty"`
 	ProcessStartedAt   *time.Time      `json:"process_started_at,omitempty"`
@@ -132,15 +140,20 @@ type Snapshot struct {
 }
 
 type record struct {
-	snapshot  Snapshot
-	arguments json.RawMessage
-	deadline  time.Time
-	cancel    context.CancelFunc
+	snapshot   Snapshot
+	arguments  json.RawMessage
+	deadline   time.Time
+	cancel     context.CancelFunc
+	workflow   *workflow
+	dependsOn  []*record
+	dependents []*record
 }
 
 // Stats reports current capacity use. It is a snapshot, not a reservation.
 type Stats struct {
 	Queued  int
+	Blocked int
+	Pending int
 	Running int
 	Stored  int
 	Halted  bool
@@ -150,21 +163,24 @@ type Stats struct {
 // cancellation. A running tool occupies a worker until Execute returns; an
 // executor must stop its work before returning after cancellation.
 type Manager struct {
-	mu       sync.Mutex
-	cond     *sync.Cond
-	config   Config
-	tools    map[string]tool.Definition
-	policies map[string]effectivePolicy
-	records  map[string]*record
-	queue    []*record
-	terminal []string
-	running  int
-	closing  bool
-	halted   bool
-	expiry   chan struct{}
-	stop     chan struct{}
-	done     chan struct{}
-	workers  sync.WaitGroup
+	mu            sync.Mutex
+	cond          *sync.Cond
+	config        Config
+	tools         map[string]tool.Definition
+	policies      map[string]effectivePolicy
+	records       map[string]*record
+	workflows     map[string]*workflow
+	queue         []*record
+	terminal      []terminalGroup
+	terminalCount int
+	pending       int
+	running       int
+	closing       bool
+	halted        bool
+	expiry        chan struct{}
+	stop          chan struct{}
+	done          chan struct{}
+	workers       sync.WaitGroup
 }
 
 // NewManager freezes the registry and starts a fixed worker pool plus one queue
@@ -186,13 +202,14 @@ func NewManager(config Config, registry *tool.Registry) (*Manager, error) {
 		policies[name] = policy
 	}
 	m := &Manager{
-		config:   config,
-		tools:    definitions,
-		policies: policies,
-		records:  make(map[string]*record),
-		expiry:   make(chan struct{}, 1),
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
+		config:    config,
+		tools:     definitions,
+		policies:  policies,
+		records:   make(map[string]*record),
+		workflows: make(map[string]*workflow),
+		expiry:    make(chan struct{}, 1),
+		stop:      make(chan struct{}),
+		done:      make(chan struct{}),
 	}
 	m.cond = sync.NewCond(&m.mu)
 	m.workers.Add(config.Workers + 1)
@@ -210,38 +227,9 @@ func NewManager(config Config, registry *tool.Registry) (*Manager, error) {
 // Submit validates a request before admission and returns its initial queued
 // state. Queue limits count accepted work not yet claimed by a worker.
 func (m *Manager) Submit(ctx context.Context, req Request) (Snapshot, error) {
-	if err := ctx.Err(); err != nil {
+	prepared, err := m.prepareRequest(ctx, req)
+	if err != nil {
 		return Snapshot{}, err
-	}
-	if len(req.AgentID) > m.config.MaxAgentIDBytes {
-		return Snapshot{}, ErrAgentIDTooLarge
-	}
-	def, ok := m.tools[req.Tool]
-	if !ok {
-		return Snapshot{}, fmt.Errorf("unknown tool %q", req.Tool)
-	}
-	policy := m.policies[req.Tool]
-	queueTimeout, err := resolveTimeout(req.QueueTimeout, policy.defaultQueueTimeout, policy.maxQueueTimeout)
-	if err != nil {
-		return Snapshot{}, fmt.Errorf("queue timeout: %w", err)
-	}
-	runTimeout, err := resolveTimeout(req.ExecutionTimeout, policy.defaultRunTimeout, policy.maxRunTimeout)
-	if err != nil {
-		return Snapshot{}, fmt.Errorf("execution timeout: %w", err)
-	}
-	outputLimit := req.OutputLimitBytes
-	if outputLimit < 0 || outputLimit > policy.maxOutputBytes {
-		return Snapshot{}, errors.New("output limit outside allowed range")
-	}
-	if outputLimit == 0 {
-		outputLimit = policy.defaultOutputBytes
-	}
-	if len(req.Arguments) > policy.maxArgumentBytes {
-		return Snapshot{}, ErrArgumentsTooLarge
-	}
-	arguments := append(json.RawMessage(nil), req.Arguments...)
-	if err := def.Validate(arguments); err != nil {
-		return Snapshot{}, fmt.Errorf("invalid tool arguments: %w", err)
 	}
 	id, err := newID()
 	if err != nil {
@@ -249,39 +237,105 @@ func (m *Manager) Submit(ctx context.Context, req Request) (Snapshot, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := ctx.Err(); err != nil {
+	if err := m.admissionError(ctx); err != nil {
 		return Snapshot{}, err
 	}
-	if m.closing {
-		return Snapshot{}, ErrClosed
-	}
-	if m.halted {
-		return Snapshot{}, ErrBackendUnavailable
-	}
-	if len(m.queue) >= m.config.QueueCapacity {
+	if m.pending >= m.config.QueueCapacity {
 		return Snapshot{}, ErrQueueFull
 	}
 	now := time.Now().UTC()
-	r := &record{snapshot: Snapshot{
-		ID:                 id,
-		TenantID:           "local",
-		AgentID:            req.AgentID,
-		Tool:               req.Tool,
-		State:              Queued,
-		CleanupStatus:      "not_needed",
-		CreatedAt:          now,
-		ReadyAt:            now,
-		QueueTimeout:       queueTimeout,
-		ExecutionTimeout:   runTimeout,
-		OutputLimitBytes:   outputLimit,
-		ArgumentLimitBytes: policy.maxArgumentBytes,
-		ResultLimitBytes:   policy.maxResultBytes,
-	}, arguments: arguments, deadline: now.Add(queueTimeout)}
+	r := prepared.makeRecord(id, "", "", now, true)
 	m.records[id] = r
 	m.queue = append(m.queue, r)
+	m.pending++
 	m.cond.Signal()
 	m.wakeExpiry()
 	return cloneSnapshot(r.snapshot), nil
+}
+
+type preparedRequest struct {
+	request      Request
+	arguments    json.RawMessage
+	policy       effectivePolicy
+	queueTimeout time.Duration
+	runTimeout   time.Duration
+	outputLimit  int
+}
+
+func (m *Manager) prepareRequest(ctx context.Context, req Request) (preparedRequest, error) {
+	if err := ctx.Err(); err != nil {
+		return preparedRequest{}, err
+	}
+	if len(req.AgentID) > m.config.MaxAgentIDBytes {
+		return preparedRequest{}, ErrAgentIDTooLarge
+	}
+	def, ok := m.tools[req.Tool]
+	if !ok {
+		return preparedRequest{}, fmt.Errorf("unknown tool %q", req.Tool)
+	}
+	policy := m.policies[req.Tool]
+	queueTimeout, err := resolveTimeout(req.QueueTimeout, policy.defaultQueueTimeout, policy.maxQueueTimeout)
+	if err != nil {
+		return preparedRequest{}, fmt.Errorf("queue timeout: %w", err)
+	}
+	runTimeout, err := resolveTimeout(req.ExecutionTimeout, policy.defaultRunTimeout, policy.maxRunTimeout)
+	if err != nil {
+		return preparedRequest{}, fmt.Errorf("execution timeout: %w", err)
+	}
+	outputLimit := req.OutputLimitBytes
+	if outputLimit < 0 || outputLimit > policy.maxOutputBytes {
+		return preparedRequest{}, errors.New("output limit outside allowed range")
+	}
+	if outputLimit == 0 {
+		outputLimit = policy.defaultOutputBytes
+	}
+	if len(req.Arguments) > policy.maxArgumentBytes {
+		return preparedRequest{}, ErrArgumentsTooLarge
+	}
+	arguments := append(json.RawMessage(nil), req.Arguments...)
+	if err := def.Validate(arguments); err != nil {
+		return preparedRequest{}, fmt.Errorf("invalid tool arguments: %w", err)
+	}
+	return preparedRequest{request: req, arguments: arguments, policy: policy, queueTimeout: queueTimeout, runTimeout: runTimeout, outputLimit: outputLimit}, nil
+}
+
+func (m *Manager) admissionError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if m.closing {
+		return ErrClosed
+	}
+	if m.halted {
+		return ErrBackendUnavailable
+	}
+	return nil
+}
+
+func (p preparedRequest) makeRecord(id, workflowID, nodeID string, now time.Time, ready bool) *record {
+	state := Blocked
+	var readyAt *time.Time
+	if ready {
+		state = Queued
+		readyAt = &now
+	}
+	return &record{snapshot: Snapshot{
+		ID:                 id,
+		TenantID:           "local",
+		AgentID:            p.request.AgentID,
+		Tool:               p.request.Tool,
+		WorkflowID:         workflowID,
+		NodeID:             nodeID,
+		State:              state,
+		CleanupStatus:      "not_needed",
+		CreatedAt:          now,
+		ReadyAt:            readyAt,
+		QueueTimeout:       p.queueTimeout,
+		ExecutionTimeout:   p.runTimeout,
+		OutputLimitBytes:   p.outputLimit,
+		ArgumentLimitBytes: p.policy.maxArgumentBytes,
+		ResultLimitBytes:   p.policy.maxResultBytes,
+	}, arguments: p.arguments, deadline: now.Add(p.queueTimeout)}
 }
 
 func resolveTimeout(given, fallback, maximum time.Duration) (time.Duration, error) {
@@ -324,8 +378,13 @@ func (m *Manager) Cancel(id string) (Snapshot, error) {
 	}
 	var cancel context.CancelFunc
 	switch r.snapshot.State {
+	case Blocked:
+		m.pending--
+		m.finishLocked(r, Cancelled, "cancelled", "cancelled before execution")
+		m.wakeExpiry()
 	case Queued:
 		m.removeQueued(r)
+		m.pending--
 		m.finishLocked(r, Cancelled, "cancelled", "cancelled before execution")
 		m.wakeExpiry()
 	case Running:
@@ -345,7 +404,7 @@ func (m *Manager) Cancel(id string) (Snapshot, error) {
 func (m *Manager) Stats() Stats {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return Stats{Queued: len(m.queue), Running: m.running, Stored: len(m.records), Halted: m.halted}
+	return Stats{Queued: len(m.queue), Blocked: m.pending - len(m.queue), Pending: m.pending, Running: m.running, Stored: len(m.records), Halted: m.halted}
 }
 
 // Close stops admission, cancels accepted work, and waits for all owned
@@ -356,12 +415,24 @@ func (m *Manager) Close(ctx context.Context) error {
 	var cancels []context.CancelFunc
 	if !m.closing {
 		m.closing = true
+		for _, w := range m.workflows {
+			if w.remaining > 0 {
+				w.cancelled = true
+				w.state = Cancelling
+			}
+		}
 		for len(m.queue) > 0 {
 			r := m.queue[0]
+			m.queue[0] = nil
 			m.queue = m.queue[1:]
+			m.pending--
 			m.finishLocked(r, Cancelled, "cancelled", "manager closed before execution")
 		}
 		for _, r := range m.records {
+			if r.snapshot.State == Blocked {
+				m.pending--
+				m.finishLocked(r, Cancelled, "cancelled", "manager closed before execution")
+			}
 			if r.snapshot.State == Running {
 				r.snapshot.State = Cancelling
 				r.snapshot.StopReason = "service_shutdown"
@@ -390,6 +461,10 @@ func (m *Manager) Close(ctx context.Context) error {
 
 func cloneSnapshot(s Snapshot) Snapshot {
 	s.Result = append(json.RawMessage(nil), s.Result...)
+	if s.ReadyAt != nil {
+		value := *s.ReadyAt
+		s.ReadyAt = &value
+	}
 	if s.RunningAt != nil {
 		value := *s.RunningAt
 		s.RunningAt = &value
@@ -421,18 +496,19 @@ func (m *Manager) removeQueued(target *record) {
 }
 
 func (m *Manager) finishLocked(r *record, state State, code, message string) {
+	if r.snapshot.FinishedAt != nil {
+		return
+	}
 	r.snapshot.State = state
 	r.snapshot.ErrorCode = code
 	r.snapshot.ErrorMessage = m.limitErrorMessage(message)
 	now := time.Now().UTC()
 	r.snapshot.FinishedAt = &now
 	r.arguments = nil
-	m.terminal = append(m.terminal, r.snapshot.ID)
-	for len(m.terminal) > m.config.RetainedResults {
-		id := m.terminal[0]
-		m.terminal[0] = ""
-		m.terminal = m.terminal[1:]
-		delete(m.records, id)
+	if r.workflow != nil {
+		m.workflowNodeFinishedLocked(r)
+	} else {
+		m.retainTerminalLocked(terminalGroup{ids: []string{r.snapshot.ID}})
 	}
 }
 
