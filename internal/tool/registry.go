@@ -18,6 +18,7 @@ type RunOptions struct {
 	OnOutputLimit    func()
 	OnProcessStarted func(time.Time)
 	SandboxResources Resources
+	ExecutionID      string
 }
 
 // Resources is a server-owned sandbox reservation. Zero means the tool does
@@ -45,6 +46,8 @@ type Outcome struct {
 	OutputTruncated  bool
 	ProcessStartedAt *time.Time
 	StopUnconfirmed  bool
+	CleanupStatus    string
+	CleanupError     string
 }
 
 // RunError gives an executor failure a stable code without coupling the

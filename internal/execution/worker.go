@@ -23,6 +23,7 @@ func (m *Manager) worker() {
 			OnOutputLimit:    func() { m.outputLimitReached(r) },
 			OnProcessStarted: func(at time.Time) { m.processStarted(r, at) },
 			SandboxResources: tool.Resources{CPUMilli: r.snapshot.SandboxCPUMilli, MemoryBytes: r.snapshot.SandboxMemoryBytes},
+			ExecutionID:      r.snapshot.ID,
 		}
 		outcome, err := runTool(ctx, m.tools[r.snapshot.Tool].Execute, r.arguments, options)
 		if !m.complete(r, ctx, outcome, err) {
@@ -135,6 +136,12 @@ func (m *Manager) complete(r *record, ctx context.Context, outcome tool.Outcome,
 	}
 	r.snapshot.Stdout = strings.ToValidUTF8(stdout, "?")
 	r.snapshot.Stderr = strings.ToValidUTF8(stderr, "?")
+	if outcome.CleanupStatus != "" {
+		r.snapshot.CleanupStatus = outcome.CleanupStatus
+	}
+	if outcome.CleanupError != "" {
+		r.snapshot.CleanupError = m.limitErrorMessage(outcome.CleanupError)
+	}
 	if outcome.StopUnconfirmed {
 		if r.snapshot.State == Running {
 			r.snapshot.State = Cancelling

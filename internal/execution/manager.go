@@ -164,6 +164,7 @@ type Snapshot struct {
 	ErrorMessage       string          `json:"error_message,omitempty"`
 	StopReason         string          `json:"stop_reason,omitempty"`
 	CleanupStatus      string          `json:"cleanup_status"`
+	CleanupError       string          `json:"cleanup_error,omitempty"`
 	Result             json.RawMessage `json:"result,omitempty"`
 	Stdout             string          `json:"stdout,omitempty"`
 	Stderr             string          `json:"stderr,omitempty"`
