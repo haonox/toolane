@@ -223,3 +223,27 @@ func TestCleanupRetryUpdatesTerminalSnapshot(t *testing.T) {
 		t.Fatalf("cleanup retry not reflected: %+v %v", snap, err)
 	}
 }
+
+func TestCleanupRetryBeforeCompletionPreservesFinalStatus(t *testing.T) {
+	registry := tool.NewRegistry()
+	if err := registry.Register(tool.Definition{
+		Name: "fast-cleanup", Resources: tool.Resources{CPUMilli: 1000, MemoryBytes: 256 * mib},
+		Validate: func(json.RawMessage) error { return nil },
+		Execute: func(_ context.Context, _ json.RawMessage, options tool.RunOptions) (tool.Outcome, error) {
+			options.OnCleanupUpdate("succeeded", "")
+			return tool.Outcome{CleanupStatus: "pending", CleanupError: "earlier removal failure"}, nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := NewManager(DefaultConfig(), registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close(context.Background()) })
+	s := submit(t, m, Request{Tool: "fast-cleanup"})
+	awaitState(t, m, s.ID, Succeeded)
+	if snap, err := m.Get(s.ID); err != nil || snap.CleanupStatus != "succeeded" || snap.CleanupError != "" {
+		t.Fatalf("late execution result overwrote cleanup recovery: %+v %v", snap, err)
+	}
+}
