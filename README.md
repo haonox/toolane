@@ -10,6 +10,8 @@ Toolane 负责接收工具任务、限制并发、组织显式依赖、管理执
 
 V0.3 已接入沙箱 CPU/内存的调度预留、固定镜像的 Docker Shell Executor 和按实例归属的有界残留回收。ACC-11～12 的自动化验收已在合并后的 `main` 上通过，记录见 [V0.3 验收](./docs/V0.3-ACCEPTANCE.md)。
 
+V1.0 的第一批增加了 [SQLite 存储基础](./docs/V1.0-SQLITE-FOUNDATION.md)：独占状态目录、版本化 schema，以及任务状态和事件的事务写入。Manager 尚未接入该存储，当前运行的任务仍是进程内状态。
+
 ## 项目目标
 
 - **调度**：有界队列、并发配额、DAG 依赖与租户公平调度。
@@ -56,7 +58,7 @@ go test -race ./...
 go vet ./...
 ```
 
-演示提供 `mock.delay` 与 `process.printf`；调用方也可在服务端注册其他可信工具或 Docker Shell 工具。V0.2 的租户 ID 只由可信进程内调用方提供，不构成身份认证；可配置 `SchedulerFIFO` 作为实验基线。执行状态和结果仅保存在内存，进程退出后丢失；尚无 HTTP 或持久化。Docker 仅面向 Linux 主机；服务启动时可按实例标签回收残留容器，删除失败会有界重试，调用方须保存稳定实例 ID 并在准入前调用恢复接口。Process Executor 与真实进程测试也以 Linux 为目标；其他平台会返回 `process_unsupported`。
+演示提供 `mock.delay` 与 `process.printf`；调用方也可在服务端注册其他可信工具或 Docker Shell 工具。V0.2 的租户 ID 只由可信进程内调用方提供，不构成身份认证；可配置 `SchedulerFIFO` 作为实验基线。当前 Manager 的执行状态和结果仅保存在内存，进程退出后丢失；尚无 HTTP 服务，SQLite 存储基础尚未接入运行路径。Docker 仅面向 Linux 主机；服务启动时可按实例标签回收残留容器，删除失败会有界重试，调用方须保存稳定实例 ID 并在准入前调用恢复接口。Process Executor 与真实进程测试也以 Linux 为目标；其他平台会返回 `process_unsupported`。
 
 ## 项目边界
 
@@ -79,6 +81,7 @@ Process Executor 只运行可信工具；Docker 版本针对常见资源滥用�
 | [docs/V0.3-DOCKER-EXECUTOR.md](./docs/V0.3-DOCKER-EXECUTOR.md) | V0.3 Docker Executor 策略、进程内接入、真实容器测试与限制 |
 | [docs/V0.3-RECOVERY.md](./docs/V0.3-RECOVERY.md) | V0.3 残留回收、故障隔离与启动顺序 |
 | [docs/V0.3-ACCEPTANCE.md](./docs/V0.3-ACCEPTANCE.md) | V0.3 阶段验收证据与边界 |
+| [docs/V1.0-SQLITE-FOUNDATION.md](./docs/V1.0-SQLITE-FOUNDATION.md) | SQLite 驱动选择、Schema v1、事务边界与测试 |
 
 **协作 AI 开始工作前须读取上述两份文档与本 README。** 未指定阶段时只开发 V0.1；不要提前实现整条路线。
 
