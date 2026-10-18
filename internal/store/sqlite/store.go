@@ -21,6 +21,7 @@ var (
 	ErrNotFound        = errors.New("execution not found")
 	ErrVersionConflict = errors.New("execution version conflict")
 	ErrNewerSchema     = errors.New("database schema is newer than this binary")
+	ErrRuntimeOwned    = errors.New("store already has a runtime owner")
 )
 
 const schemaVersion = 2
@@ -50,10 +51,11 @@ type Event struct {
 // Store holds the state directory lock until Close. SQLite connections are
 // limited to one because the first version has a single process writer.
 type Store struct {
-	db       *sql.DB
-	lockFile *os.File
-	mu       sync.Mutex
-	closed   bool
+	db           *sql.DB
+	lockFile     *os.File
+	mu           sync.Mutex
+	closed       bool
+	runtimeOwned bool
 }
 
 // Open creates or migrates the database and exclusively claims stateDir.
@@ -206,10 +208,36 @@ func (s *Store) Close() error {
 	if s.closed {
 		return nil
 	}
+	if s.runtimeOwned {
+		return ErrRuntimeOwned
+	}
 	s.closed = true
 	dbErr := s.db.Close()
 	lockErr := s.lockFile.Close()
 	return errors.Join(dbErr, lockErr)
+}
+
+// ClaimRuntime prevents two managers in one process from scheduling the same
+// persisted queue through one Store. Release the claim only after all workers
+// have stopped; the state directory lock separately excludes other processes.
+func (s *Store) ClaimRuntime() (func(), error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
+	if s.runtimeOwned {
+		return nil, ErrRuntimeOwned
+	}
+	s.runtimeOwned = true
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.mu.Lock()
+			s.runtimeOwned = false
+			s.mu.Unlock()
+		})
+	}, nil
 }
 
 // CreateExecution commits the accepted record and its first event together.
@@ -308,6 +336,27 @@ func (s *Store) GetExecution(ctx context.Context, id string) (Execution, error) 
 	}
 	record.CreatedAt = time.Unix(0, createdAtNS).UTC()
 	return record, nil
+}
+
+// ListExecutions returns records in admission order for startup coordination.
+func (s *Store) ListExecutions(ctx context.Context) ([]Execution, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, tenant_id, state, snapshot, request, created_at_ns, version
+		FROM executions ORDER BY created_at_ns, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var records []Execution
+	for rows.Next() {
+		var record Execution
+		var createdAtNS int64
+		if err := rows.Scan(&record.ID, &record.TenantID, &record.State, &record.Snapshot, &record.Request, &createdAtNS, &record.Version); err != nil {
+			return nil, err
+		}
+		record.CreatedAt = time.Unix(0, createdAtNS).UTC()
+		records = append(records, record)
+	}
+	return records, rows.Err()
 }
 
 // EventsAfter returns persisted events in sequence order for replay.

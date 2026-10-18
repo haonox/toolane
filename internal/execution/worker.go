@@ -14,31 +14,31 @@ import (
 func (m *Manager) worker() {
 	defer m.workers.Done()
 	for {
-		r, ctx, ok := m.claim()
+		r, snapshot, ctx, ok := m.claim()
 		if !ok {
 			return
 		}
 		options := tool.RunOptions{
-			MaxOutputBytes:   r.snapshot.OutputLimitBytes,
+			MaxOutputBytes:   snapshot.OutputLimitBytes,
 			OnOutputLimit:    func() { m.outputLimitReached(r) },
 			OnProcessStarted: func(at time.Time) { m.processStarted(r, at) },
 			OnCleanupUpdate:  func(status, message string) { m.cleanupUpdated(r, status, message) },
-			SandboxResources: tool.Resources{CPUMilli: r.snapshot.SandboxCPUMilli, MemoryBytes: r.snapshot.SandboxMemoryBytes},
-			ExecutionID:      r.snapshot.ID,
+			SandboxResources: tool.Resources{CPUMilli: snapshot.SandboxCPUMilli, MemoryBytes: snapshot.SandboxMemoryBytes},
+			ExecutionID:      snapshot.ID,
 		}
-		outcome, err := runTool(ctx, m.tools[r.snapshot.Tool].Execute, r.arguments, options)
+		outcome, err := runTool(ctx, m.tools[snapshot.Tool].Execute, r.arguments, options)
 		if !m.complete(r, ctx, outcome, err) {
 			return
 		}
 	}
 }
 
-func (m *Manager) claim() (*record, context.Context, bool) {
+func (m *Manager) claim() (*record, Snapshot, context.Context, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for {
 		if m.closing {
-			return nil, nil, false
+			return nil, Snapshot{}, nil, false
 		}
 		if m.halted {
 			m.cond.Wait()
@@ -51,13 +51,21 @@ func (m *Manager) claim() (*record, context.Context, bool) {
 		}
 		m.wakeExpiry()
 		if !time.Now().Before(r.deadline) {
+			if err := m.finishLocked(r, TimedOut, "queue_timeout", "queue wait expired"); err != nil {
+				m.queue = append([]*record{r}, m.queue...)
+				continue
+			}
 			m.releasePendingLocked(r)
-			m.finishLocked(r, TimedOut, "queue_timeout", "queue wait expired")
 			continue
 		}
 		now := time.Now().UTC()
-		r.snapshot.State = Running
-		r.snapshot.RunningAt = &now
+		next := cloneSnapshot(r.snapshot)
+		next.State = Running
+		next.RunningAt = &now
+		if err := m.applySnapshotLocked(r, next); err != nil {
+			m.queue = append([]*record{r}, m.queue...)
+			continue
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), r.snapshot.ExecutionTimeout)
 		r.cancel = cancel
 		m.claimSlotLocked(r)
@@ -70,7 +78,7 @@ func (m *Manager) claim() (*record, context.Context, bool) {
 				m.timeoutRunning(r)
 			}
 		})
-		return r, ctx, true
+		return r, cloneSnapshot(r.snapshot), ctx, true
 	}
 }
 
@@ -88,8 +96,10 @@ func (m *Manager) timeoutRunning(r *record) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if r.snapshot.State == Running {
-		r.snapshot.State = Cancelling
-		r.snapshot.StopReason = "execution_timeout"
+		next := cloneSnapshot(r.snapshot)
+		next.State = Cancelling
+		next.StopReason = "execution_timeout"
+		_ = m.applySnapshotLocked(r, next)
 	}
 }
 
@@ -97,8 +107,10 @@ func (m *Manager) outputLimitReached(r *record) {
 	m.mu.Lock()
 	var cancel context.CancelFunc
 	if r.snapshot.State == Running {
-		r.snapshot.State = Cancelling
-		r.snapshot.StopReason = "output_limit_exceeded"
+		next := cloneSnapshot(r.snapshot)
+		next.State = Cancelling
+		next.StopReason = "output_limit_exceeded"
+		_ = m.applySnapshotLocked(r, next)
 		cancel = r.cancel
 	}
 	m.mu.Unlock()
@@ -112,7 +124,9 @@ func (m *Manager) processStarted(r *record, at time.Time) {
 	defer m.mu.Unlock()
 	if r.snapshot.State == Running || r.snapshot.State == Cancelling {
 		at = at.UTC()
-		r.snapshot.ProcessStartedAt = &at
+		next := cloneSnapshot(r.snapshot)
+		next.ProcessStartedAt = &at
+		_ = m.applySnapshotKindLocked(r, next, "progress")
 	}
 }
 
@@ -122,67 +136,74 @@ func (m *Manager) cleanupUpdated(r *record, status, message string) {
 	if status != "succeeded" && status != "failed" {
 		return
 	}
-	r.snapshot.CleanupStatus = status
-	r.snapshot.CleanupError = m.limitErrorMessage(message)
+	next := cloneSnapshot(r.snapshot)
+	next.CleanupStatus = status
+	next.CleanupError = m.limitErrorMessage(message)
+	_ = m.applySnapshotKindLocked(r, next, "progress")
 }
 
 func (m *Manager) complete(r *record, ctx context.Context, outcome tool.Outcome, err error) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	defer r.cancel()
+	next := cloneSnapshot(r.snapshot)
 	if outcome.ProcessStartedAt != nil {
-		r.snapshot.ProcessStartedAt = outcome.ProcessStartedAt
+		next.ProcessStartedAt = outcome.ProcessStartedAt
 	}
-	r.snapshot.ExitCode = outcome.ExitCode
-	r.snapshot.OutputTruncated = outcome.OutputTruncated
+	next.ExitCode = outcome.ExitCode
+	next.OutputTruncated = outcome.OutputTruncated
 	stdout, stderr := outcome.Stdout, outcome.Stderr
-	limit := r.snapshot.OutputLimitBytes
+	limit := next.OutputLimitBytes
 	if len(stdout) > limit {
 		stdout = stdout[:limit]
-		r.snapshot.OutputTruncated = true
+		next.OutputTruncated = true
 	}
 	if len(stderr) > limit-len(stdout) {
 		stderr = stderr[:limit-len(stdout)]
-		r.snapshot.OutputTruncated = true
+		next.OutputTruncated = true
 	}
-	r.snapshot.Stdout = strings.ToValidUTF8(stdout, "?")
-	r.snapshot.Stderr = strings.ToValidUTF8(stderr, "?")
-	cleanupFinalized := outcome.CleanupStatus == "pending" && (r.snapshot.CleanupStatus == "succeeded" || r.snapshot.CleanupStatus == "failed")
+	next.Stdout = strings.ToValidUTF8(stdout, "?")
+	next.Stderr = strings.ToValidUTF8(stderr, "?")
+	cleanupFinalized := outcome.CleanupStatus == "pending" && (next.CleanupStatus == "succeeded" || next.CleanupStatus == "failed")
 	if outcome.CleanupStatus != "" && !cleanupFinalized {
-		r.snapshot.CleanupStatus = outcome.CleanupStatus
+		next.CleanupStatus = outcome.CleanupStatus
 	}
 	if outcome.CleanupError != "" && !cleanupFinalized {
-		r.snapshot.CleanupError = m.limitErrorMessage(outcome.CleanupError)
+		next.CleanupError = m.limitErrorMessage(outcome.CleanupError)
 	}
 	if outcome.StopUnconfirmed {
-		if r.snapshot.State == Running {
-			r.snapshot.State = Cancelling
-			r.snapshot.StopReason = "stop_unconfirmed"
+		if next.State == Running {
+			next.State = Cancelling
+			next.StopReason = "stop_unconfirmed"
 		}
-		r.snapshot.CleanupStatus = "failed"
+		next.CleanupStatus = "failed"
 		if err != nil {
-			r.snapshot.ErrorMessage = m.limitErrorMessage(err.Error())
+			next.ErrorMessage = m.limitErrorMessage(err.Error())
+		}
+		if applyErr := m.applySnapshotLocked(r, next); applyErr != nil {
+			return false
 		}
 		m.halted = true
 		m.cond.Broadcast()
 		return false
 	}
-	if r.snapshot.State == Running && ctx.Err() == context.DeadlineExceeded {
-		r.snapshot.State = Cancelling
-		r.snapshot.StopReason = "execution_timeout"
+	if next.State == Running && ctx.Err() == context.DeadlineExceeded {
+		next.State = Cancelling
+		next.StopReason = "execution_timeout"
 	}
-	if r.snapshot.State == Running && r.snapshot.OutputTruncated {
-		r.snapshot.State = Cancelling
-		r.snapshot.StopReason = "output_limit_exceeded"
+	if next.State == Running && next.OutputTruncated {
+		next.State = Cancelling
+		next.StopReason = "output_limit_exceeded"
 	}
-	if r.snapshot.State == Cancelling {
-		switch r.snapshot.StopReason {
+	var finishErr error
+	if next.State == Cancelling {
+		switch next.StopReason {
 		case "execution_timeout":
-			m.finishLocked(r, TimedOut, "execution_timeout", "execution deadline expired")
+			finishErr = m.finishWithSnapshotLocked(r, next, TimedOut, "execution_timeout", "execution deadline expired")
 		case "output_limit_exceeded":
-			m.finishLocked(r, Failed, "output_limit_exceeded", "combined stdout and stderr exceeded limit")
+			finishErr = m.finishWithSnapshotLocked(r, next, Failed, "output_limit_exceeded", "combined stdout and stderr exceeded limit")
 		default:
-			m.finishLocked(r, Cancelled, "cancelled", "execution stopped")
+			finishErr = m.finishWithSnapshotLocked(r, next, Cancelled, "cancelled", "execution stopped")
 		}
 	} else if err != nil {
 		code := "execution_failed"
@@ -190,14 +211,17 @@ func (m *Manager) complete(r *record, ctx context.Context, outcome tool.Outcome,
 		if errors.As(err, &runErr) && runErr != nil && runErr.Code != "" {
 			code = runErr.Code
 		}
-		m.finishLocked(r, Failed, code, err.Error())
-	} else if len(outcome.Result) > r.snapshot.ResultLimitBytes {
-		m.finishLocked(r, Failed, "result_limit_exceeded", "structured result exceeds limit")
+		finishErr = m.finishWithSnapshotLocked(r, next, Failed, code, err.Error())
+	} else if len(outcome.Result) > next.ResultLimitBytes {
+		finishErr = m.finishWithSnapshotLocked(r, next, Failed, "result_limit_exceeded", "structured result exceeds limit")
 	} else if len(outcome.Result) > 0 && !json.Valid(outcome.Result) {
-		m.finishLocked(r, Failed, "invalid_result", "executor returned invalid JSON")
+		finishErr = m.finishWithSnapshotLocked(r, next, Failed, "invalid_result", "executor returned invalid JSON")
 	} else {
-		r.snapshot.Result = append(json.RawMessage(nil), outcome.Result...)
-		m.finishLocked(r, Succeeded, "", "")
+		next.Result = append(json.RawMessage(nil), outcome.Result...)
+		finishErr = m.finishWithSnapshotLocked(r, next, Succeeded, "", "")
+	}
+	if finishErr != nil {
+		return false
 	}
 	m.releaseRunningLocked(r)
 	return true
@@ -213,6 +237,11 @@ func (m *Manager) expireQueued() {
 			m.mu.Unlock()
 			return
 		}
+		if m.storeError != nil {
+			m.mu.Unlock()
+			<-m.stop
+			return
+		}
 		now := time.Now()
 		var next time.Time
 		for _, r := range m.records {
@@ -220,11 +249,14 @@ func (m *Manager) expireQueued() {
 				continue
 			}
 			if !now.Before(r.deadline) {
-				if r.snapshot.State == Queued {
+				wasQueued := r.snapshot.State == Queued
+				if err := m.finishLocked(r, TimedOut, "queue_timeout", "queue wait expired"); err != nil {
+					break
+				}
+				if wasQueued {
 					m.removeQueued(r)
 				}
 				m.releasePendingLocked(r)
-				m.finishLocked(r, TimedOut, "queue_timeout", "queue wait expired")
 				continue
 			}
 			if next.IsZero() || r.deadline.Before(next) {

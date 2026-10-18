@@ -1,4 +1,4 @@
-// Package execution owns the in-memory lifecycle of local tool executions.
+// Package execution owns the lifecycle of local tool executions.
 package execution
 
 import (
@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/haonox/toolane/internal/store/sqlite"
 	"github.com/haonox/toolane/internal/tool"
 )
 
@@ -52,15 +53,16 @@ const (
 )
 
 const (
-	Blocked    State = "blocked"
-	Queued     State = "queued"
-	Running    State = "running"
-	Cancelling State = "cancelling"
-	Succeeded  State = "succeeded"
-	Failed     State = "failed"
-	TimedOut   State = "timed_out"
-	Cancelled  State = "cancelled"
-	Skipped    State = "skipped"
+	Blocked     State = "blocked"
+	Queued      State = "queued"
+	Running     State = "running"
+	Cancelling  State = "cancelling"
+	Succeeded   State = "succeeded"
+	Failed      State = "failed"
+	TimedOut    State = "timed_out"
+	Cancelled   State = "cancelled"
+	Skipped     State = "skipped"
+	Interrupted State = "interrupted"
 )
 
 // Config bounds active work and retained results. Use DefaultConfig as a
@@ -188,6 +190,7 @@ type record struct {
 	snapshot   Snapshot
 	arguments  json.RawMessage
 	deadline   time.Time
+	version    int64
 	cancel     context.CancelFunc
 	tenant     *tenantState
 	workflow   *workflow
@@ -215,6 +218,9 @@ type Manager struct {
 	mu                         sync.Mutex
 	cond                       *sync.Cond
 	config                     Config
+	store                      *sqlite.Store
+	storeError                 error
+	runtimeRelease             func()
 	tools                      map[string]tool.Definition
 	policies                   map[string]effectivePolicy
 	records                    map[string]*record
@@ -240,6 +246,15 @@ type Manager struct {
 // NewManager freezes the registry and starts a fixed worker pool plus one queue
 // deadline monitor. Call Close to stop them.
 func NewManager(config Config, registry *tool.Registry) (*Manager, error) {
+	m, err := newManager(config, registry, nil)
+	if err != nil {
+		return nil, err
+	}
+	m.startWorkers()
+	return m, nil
+}
+
+func newManager(config Config, registry *tool.Registry, store *sqlite.Store) (*Manager, error) {
 	if err := config.validate(); err != nil {
 		return nil, err
 	}
@@ -257,6 +272,7 @@ func NewManager(config Config, registry *tool.Registry) (*Manager, error) {
 	}
 	m := &Manager{
 		config:    config,
+		store:     store,
 		tools:     definitions,
 		policies:  policies,
 		records:   make(map[string]*record),
@@ -267,6 +283,11 @@ func NewManager(config Config, registry *tool.Registry) (*Manager, error) {
 		done:      make(chan struct{}),
 	}
 	m.cond = sync.NewCond(&m.mu)
+	return m, nil
+}
+
+func (m *Manager) startWorkers() {
+	config := m.config
 	m.workers.Add(config.Workers + 1)
 	for range config.Workers {
 		go m.worker()
@@ -276,12 +297,24 @@ func NewManager(config Config, registry *tool.Registry) (*Manager, error) {
 		m.workers.Wait()
 		close(m.done)
 	}()
-	return m, nil
 }
 
 // Submit validates a request before admission and returns its initial queued
 // state. Queue limits count accepted work not yet claimed by a worker.
 func (m *Manager) Submit(ctx context.Context, req Request) (Snapshot, error) {
+	return m.submit(ctx, req, "")
+}
+
+// SubmitIdempotent is available only on a durable manager. The key is scoped
+// to the authenticated tenant and single-execution submission endpoint.
+func (m *Manager) SubmitIdempotent(ctx context.Context, req Request, key string) (Snapshot, error) {
+	if m.store == nil || key == "" {
+		return Snapshot{}, errors.New("idempotent submission requires a durable manager and nonempty key")
+	}
+	return m.submit(ctx, req, key)
+}
+
+func (m *Manager) submit(ctx context.Context, req Request, key string) (Snapshot, error) {
 	prepared, err := m.prepareRequest(ctx, req)
 	if err != nil {
 		return Snapshot{}, err
@@ -295,6 +328,25 @@ func (m *Manager) Submit(ctx context.Context, req Request) (Snapshot, error) {
 	if err := m.admissionError(ctx); err != nil {
 		return Snapshot{}, err
 	}
+	var normalizedRequest []byte
+	if m.store != nil {
+		normalizedRequest, err = encodeNormalizedRequest(prepared)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		if key != "" {
+			oldID, found, err := m.store.ResolveIdempotency(ctx, prepared.request.TenantID, executionEndpoint, key, normalizedRequest)
+			if err != nil {
+				if !errors.Is(err, sqlite.ErrIdempotencyConflict) && ctx.Err() == nil {
+					m.haltStoreLocked(err)
+				}
+				return Snapshot{}, err
+			}
+			if found {
+				return m.getLocked(oldID)
+			}
+		}
+	}
 	if m.pending >= m.config.QueueCapacity {
 		return Snapshot{}, ErrQueueFull
 	}
@@ -303,6 +355,19 @@ func (m *Manager) Submit(ctx context.Context, req Request) (Snapshot, error) {
 	}
 	now := time.Now().UTC()
 	r := prepared.makeRecord(id, "", "", now, true)
+	if m.store != nil {
+		// Once admission begins, its database transaction must finish even if
+		// the submitting client disconnects. A retry can resolve the key.
+		persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		oldID, reused, err := m.createStoredExecutionLocked(persistCtx, r, normalizedRequest, key)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		if reused {
+			return m.getLocked(oldID)
+		}
+	}
 	m.records[id] = r
 	m.queue = append(m.queue, r)
 	m.admitPendingLocked(r)
@@ -376,6 +441,9 @@ func (m *Manager) admissionError(ctx context.Context) error {
 		return ErrClosed
 	}
 	if m.halted {
+		if m.storeError != nil {
+			return fmt.Errorf("%w: storage: %v", ErrBackendUnavailable, m.storeError)
+		}
 		return ErrBackendUnavailable
 	}
 	return nil
@@ -431,9 +499,29 @@ func newID() (string, error) {
 func (m *Manager) Get(id string) (Snapshot, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.getLocked(id)
+}
+
+func (m *Manager) getLocked(id string) (Snapshot, error) {
 	r, ok := m.records[id]
 	if !ok {
-		return Snapshot{}, ErrNotFound
+		if m.store == nil {
+			return Snapshot{}, ErrNotFound
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		row, err := m.store.GetExecution(ctx, id)
+		if errors.Is(err, sqlite.ErrNotFound) {
+			return Snapshot{}, ErrNotFound
+		}
+		if err != nil {
+			return Snapshot{}, err
+		}
+		recovered, err := decodeStoredExecution(row)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		return cloneSnapshot(recovered.snapshot), nil
 	}
 	return cloneSnapshot(r.snapshot), nil
 }
@@ -444,23 +532,49 @@ func (m *Manager) Cancel(id string) (Snapshot, error) {
 	m.mu.Lock()
 	r, ok := m.records[id]
 	if !ok {
+		if m.store != nil {
+			snapshot, err := m.getLocked(id)
+			m.mu.Unlock()
+			if err == nil && snapshot.FinishedAt != nil {
+				return snapshot, nil
+			}
+			if err != nil {
+				return Snapshot{}, err
+			}
+			return Snapshot{}, ErrNotFound
+		}
 		m.mu.Unlock()
 		return Snapshot{}, ErrNotFound
 	}
 	var cancel context.CancelFunc
 	switch r.snapshot.State {
 	case Blocked:
+		if err := m.finishLocked(r, Cancelled, "cancelled", "cancelled before execution"); err != nil {
+			m.mu.Unlock()
+			return Snapshot{}, err
+		}
 		m.releasePendingLocked(r)
-		m.finishLocked(r, Cancelled, "cancelled", "cancelled before execution")
 		m.wakeExpiry()
 	case Queued:
+		if err := m.finishLocked(r, Cancelled, "cancelled", "cancelled before execution"); err != nil {
+			m.mu.Unlock()
+			return Snapshot{}, err
+		}
 		m.removeQueued(r)
 		m.releasePendingLocked(r)
-		m.finishLocked(r, Cancelled, "cancelled", "cancelled before execution")
 		m.wakeExpiry()
 	case Running:
-		r.snapshot.State = Cancelling
-		r.snapshot.StopReason = "user_cancelled"
+		next := cloneSnapshot(r.snapshot)
+		next.State = Cancelling
+		next.StopReason = "user_cancelled"
+		if err := m.applySnapshotLocked(r, next); err != nil {
+			cancel = r.cancel
+			m.mu.Unlock()
+			if cancel != nil {
+				cancel()
+			}
+			return Snapshot{}, err
+		}
 		cancel = r.cancel
 	}
 	snapshot := cloneSnapshot(r.snapshot)
@@ -484,6 +598,7 @@ func (m *Manager) Stats() Stats {
 func (m *Manager) Close(ctx context.Context) error {
 	m.mu.Lock()
 	var cancels []context.CancelFunc
+	var closeErr error
 	if !m.closing {
 		m.closing = true
 		for _, w := range m.workflows {
@@ -496,17 +611,25 @@ func (m *Manager) Close(ctx context.Context) error {
 			r := m.queue[0]
 			m.queue[0] = nil
 			m.queue = m.queue[1:]
+			if err := m.finishLocked(r, Cancelled, "cancelled", "manager closed before execution"); err != nil {
+				closeErr = errors.Join(closeErr, err)
+			}
 			m.releasePendingLocked(r)
-			m.finishLocked(r, Cancelled, "cancelled", "manager closed before execution")
 		}
 		for _, r := range m.records {
 			if r.snapshot.State == Blocked {
+				if err := m.finishLocked(r, Cancelled, "cancelled", "manager closed before execution"); err != nil {
+					closeErr = errors.Join(closeErr, err)
+				}
 				m.releasePendingLocked(r)
-				m.finishLocked(r, Cancelled, "cancelled", "manager closed before execution")
 			}
 			if r.snapshot.State == Running {
-				r.snapshot.State = Cancelling
-				r.snapshot.StopReason = "service_shutdown"
+				next := cloneSnapshot(r.snapshot)
+				next.State = Cancelling
+				next.StopReason = "service_shutdown"
+				if err := m.applySnapshotLocked(r, next); err != nil {
+					closeErr = errors.Join(closeErr, err)
+				}
 				cancels = append(cancels, r.cancel)
 			}
 		}
@@ -522,11 +645,15 @@ func (m *Manager) Close(ctx context.Context) error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if m.running != 0 {
-			return ErrStopUnconfirmed
+			return errors.Join(closeErr, m.storeError, ErrStopUnconfirmed)
 		}
-		return nil
+		if m.runtimeRelease != nil {
+			m.runtimeRelease()
+			m.runtimeRelease = nil
+		}
+		return errors.Join(closeErr, m.storeError)
 	case <-ctx.Done():
-		return ctx.Err()
+		return errors.Join(closeErr, ctx.Err())
 	}
 }
 
@@ -566,21 +693,30 @@ func (m *Manager) removeQueued(target *record) {
 	}
 }
 
-func (m *Manager) finishLocked(r *record, state State, code, message string) {
+func (m *Manager) finishLocked(r *record, state State, code, message string) error {
+	return m.finishWithSnapshotLocked(r, r.snapshot, state, code, message)
+}
+
+func (m *Manager) finishWithSnapshotLocked(r *record, base Snapshot, state State, code, message string) error {
 	if r.snapshot.FinishedAt != nil {
-		return
+		return nil
 	}
-	r.snapshot.State = state
-	r.snapshot.ErrorCode = code
-	r.snapshot.ErrorMessage = m.limitErrorMessage(message)
+	next := cloneSnapshot(base)
+	next.State = state
+	next.ErrorCode = code
+	next.ErrorMessage = m.limitErrorMessage(message)
 	now := time.Now().UTC()
-	r.snapshot.FinishedAt = &now
+	next.FinishedAt = &now
+	if err := m.applySnapshotLocked(r, next); err != nil {
+		return err
+	}
 	r.arguments = nil
 	if r.workflow != nil {
 		m.workflowNodeFinishedLocked(r)
 	} else {
 		m.retainTerminalLocked(terminalGroup{ids: []string{r.snapshot.ID}})
 	}
+	return nil
 }
 
 func (m *Manager) limitErrorMessage(message string) string {

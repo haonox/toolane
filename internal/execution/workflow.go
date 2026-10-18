@@ -57,6 +57,9 @@ type terminalGroup struct {
 // SubmitWorkflow validates all nodes before atomically accepting the batch.
 // Blocked nodes count toward the same pending capacity as ready nodes.
 func (m *Manager) SubmitWorkflow(ctx context.Context, req WorkflowRequest) (WorkflowSnapshot, error) {
+	if m.store != nil {
+		return WorkflowSnapshot{}, ErrDurableWorkflowPending
+	}
 	dependencies, err := m.validateWorkflow(req)
 	if err != nil {
 		return WorkflowSnapshot{}, err
