@@ -8,7 +8,7 @@ Toolane 负责接收工具任务、限制并发、组织显式依赖、管理执
 
 > V0.1 的单机闭环已可运行，Linux 自动化验收覆盖 ACC-01～07。V0.2 的 DAG、进程内模拟租户配额、轮询调度与 FIFO 对比实验已实现，ACC-08～10 自动化验收通过。
 
-V0.3 第一批已接入沙箱 CPU/内存的调度预留和超额拒绝；Docker Executor 与真实容器隔离测试尚未接入。
+V0.3 已接入沙箱 CPU/内存的调度预留，并提供固定镜像的 Docker Shell Executor；真实容器测试覆盖隔离、非零退出、输出洪泛和超时。后台残留回收与完整阶段验收仍待后续批次。
 
 ## 项目目标
 
@@ -46,6 +46,8 @@ go run ./cmd/toolane process
 
 Process Executor 只运行服务端显式注册且标为可信的绝对路径程序，用参数数组启动，不调用 Shell。Linux 下为进程建立独立进程组；取消、超时或输出达到上限时先发送 SIGTERM，宽限期后发送 SIGKILL，并限制等待继承管道的时间。若进程组停止无法确认，Manager 保留运行预留、暂停新任务准入并报告关闭错误。这个机制仅适用于可信程序，不是安全沙箱。CLI 的 `process` 演示运行系统 `printf`；没有任意命令执行入口。
 
+Docker Executor 通过进程内工具注册使用；管理员必须指定已在本地存在的镜像标签、SHA-256 digest 和部署实例 ID。它在启动前检查 Docker cgroup v2、seccomp 和实际容器配置；任务只能提交 Shell 脚本，不能指定镜像、网络、挂载或权限。容器默认无网络，以非 root 运行，使用只读根目录和有大小限制的 tmpfs 工作区。用法、策略与测试命令见 [V0.3 Docker Executor 说明](./docs/V0.3-DOCKER-EXECUTOR.md)。CLI 尚未提供 Docker 演示入口。
+
 运行检查：
 
 ```bash
@@ -54,7 +56,7 @@ go test -race ./...
 go vet ./...
 ```
 
-演示提供 `mock.delay` 与 `process.printf`；调用方也可在服务端注册其他可信工具。V0.2 的租户 ID 只由可信进程内调用方提供，不构成身份认证；可配置 `SchedulerFIFO` 作为实验基线。执行状态和结果仅保存在内存，进程退出后丢失；尚无 Docker、HTTP 或持久化。Process Executor 与真实进程测试以 Linux 为目标；其他平台会返回 `process_unsupported`。
+演示提供 `mock.delay` 与 `process.printf`；调用方也可在服务端注册其他可信工具或 Docker Shell 工具。V0.2 的租户 ID 只由可信进程内调用方提供，不构成身份认证；可配置 `SchedulerFIFO` 作为实验基线。执行状态和结果仅保存在内存，进程退出后丢失；尚无 HTTP 或持久化。Docker 仅面向 Linux 主机；异常退出后的残留容器后台回收尚未实现。Process Executor 与真实进程测试也以 Linux 为目标；其他平台会返回 `process_unsupported`。
 
 ## 项目边界
 
@@ -74,6 +76,7 @@ Process Executor 只运行可信工具；Docker 版本针对常见资源滥用�
 | [docs/V0.2-SCHEDULER.md](./docs/V0.2-SCHEDULER.md) | 租户配额、轮询调度、测试与 FIFO 对比实验 |
 | [docs/V0.2-ACCEPTANCE.md](./docs/V0.2-ACCEPTANCE.md) | V0.2 阶段验收命令、证据与边界 |
 | [docs/V0.3-RESOURCE-BUDGET.md](./docs/V0.3-RESOURCE-BUDGET.md) | V0.3 第一批的沙箱资源准入语义与验证范围 |
+| [docs/V0.3-DOCKER-EXECUTOR.md](./docs/V0.3-DOCKER-EXECUTOR.md) | V0.3 Docker Executor 策略、进程内接入、真实容器测试与限制 |
 
 **协作 AI 开始工作前须读取上述两份文档与本 README。** 未指定阶段时只开发 V0.1；不要提前实现整条路线。
 
