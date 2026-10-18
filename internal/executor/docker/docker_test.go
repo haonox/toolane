@@ -156,6 +156,29 @@ func TestPolicyCheckedBeforeStartAndContainerRemoved(t *testing.T) {
 	}
 }
 
+func TestResourceRecordFailurePreventsStartAndCleansContainer(t *testing.T) {
+	s := testSpec(t)
+	f := &fakeCLI{info: secureInfo(s)}
+	def, err := scriptDefinition("shell", s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	options := testOptions(s)
+	options.OnResourceCreated = func(ref tool.ResourceRef) error {
+		called = true
+		if f.attached || ref.Kind != tool.ResourceDockerContainer || ref.ID != f.info.ID || ref.InstanceID != s.InstanceID {
+			return errors.New("resource callback ran after start or received wrong ownership")
+		}
+		return errors.New("SQLite unavailable")
+	}
+	out, err := def.Execute(context.Background(), json.RawMessage(`{"script":"echo hello"}`), options)
+	var runErr *tool.RunError
+	if !errors.As(err, &runErr) || runErr.Code != "sandbox_resource_record_failed" || !called || f.attached || !f.removed || out.CleanupStatus != "succeeded" {
+		t.Fatalf("resource write failure started or leaked container: outcome=%+v err=%v called=%t attached=%t removed=%t", out, err, called, f.attached, f.removed)
+	}
+}
+
 func TestRemovalFailureIsSeparateFromExecutionResult(t *testing.T) {
 	s := testSpec(t)
 	f := &fakeCLI{info: secureInfo(s), removeErr: errors.New("remove denied")}

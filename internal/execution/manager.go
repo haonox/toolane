@@ -191,6 +191,7 @@ type record struct {
 	arguments  json.RawMessage
 	deadline   time.Time
 	version    int64
+	resource   *tool.ResourceRef
 	cancel     context.CancelFunc
 	tenant     *tenantState
 	workflow   *workflow
