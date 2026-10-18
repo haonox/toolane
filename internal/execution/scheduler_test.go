@@ -155,6 +155,152 @@ func TestTenantRunningLimitSkipsSaturatedTenant(t *testing.T) {
 	}
 }
 
+// ACC-10: a tenant that keeps submitting against a full queue cannot prevent
+// another ready tenant from being claimed, and its pending quota stays bounded.
+func TestTenantContinuousSubmissionDoesNotStarveOtherTenant(t *testing.T) {
+	config := DefaultConfig()
+	config.Workers = 1
+	config.QueueCapacity = 128
+	config.TenantRunningLimit = 1
+	started := make(chan string, 2)
+	releaseAnchor := make(chan struct{})
+	releaseB := make(chan struct{})
+	producerAccepted := make(chan struct{})
+	allowAAfterB := make(chan struct{})
+	var aStarted, accepted, rejected atomic.Int32
+	m := workflowManager(t, config, func(ctx context.Context, value string) error {
+		switch value {
+		case "anchor":
+			started <- value
+			select {
+			case <-releaseAnchor:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		case "A":
+			if aStarted.Add(1) == 1 {
+				select {
+				case <-producerAccepted:
+				case <-allowAAfterB:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+		case "B":
+			started <- value
+			select {
+			case <-releaseB:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return nil
+	})
+	anchor := submit(t, m, tenantRequest("anchor", "anchor"))
+	if got := <-started; got != "anchor" {
+		t.Fatalf("first start = %q", got)
+	}
+	for range config.TenantPendingLimit {
+		submit(t, m, tenantRequest("A", "A"))
+	}
+	b := submit(t, m, tenantRequest("B", "B"))
+	producerCtx, stopProducer := context.WithCancel(context.Background())
+	producerDone := make(chan struct{})
+	producerError := make(chan error, 1)
+	go func() {
+		defer close(producerDone)
+		for {
+			if producerCtx.Err() != nil {
+				return
+			}
+			_, err := m.Submit(producerCtx, tenantRequest("A", "A"))
+			switch {
+			case err == nil:
+				if accepted.Add(1) == 1 {
+					close(producerAccepted)
+				}
+			case errors.Is(err, ErrTenantQueueFull):
+				rejected.Add(1)
+			case producerCtx.Err() != nil:
+				return
+			default:
+				producerError <- err
+				return
+			}
+			select {
+			case <-producerCtx.Done():
+				return
+			case <-time.After(100 * time.Microsecond):
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		stopProducer()
+		<-producerDone
+		for _, ch := range []chan struct{}{releaseAnchor, releaseB, allowAAfterB} {
+			select {
+			case <-ch:
+			default:
+				close(ch)
+			}
+		}
+	})
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for rejected.Load() < 20 {
+		select {
+		case err := <-producerError:
+			t.Fatalf("A producer failed: %v", err)
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatalf("A producer did not keep submitting: rejected=%d", rejected.Load())
+		}
+	}
+	close(releaseAnchor)
+	select {
+	case got := <-started:
+		if got != "B" {
+			t.Fatalf("other tenant start = %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("B was starved by continuous A submissions")
+	}
+	aBeforeB := aStarted.Load()
+	if aBeforeB > 1 {
+		t.Fatalf("A claimed %d tasks before B", aBeforeB)
+	}
+	if aBeforeB == 1 && accepted.Load() == 0 {
+		t.Fatal("A producer did not refill the queue before B started")
+	}
+	if stats := m.Stats(); stats.Running != 1 || stats.Pending < config.TenantPendingLimit-1 || stats.Pending > config.TenantPendingLimit {
+		t.Fatalf("B did not start while A backlog remained bounded: %+v", stats)
+	}
+	stopProducer()
+	<-producerDone
+	close(allowAAfterB)
+	select {
+	case err := <-producerError:
+		t.Fatalf("A producer failed: %v", err)
+	default:
+	}
+	close(releaseB)
+	awaitState(t, m, anchor.ID, Succeeded)
+	awaitState(t, m, b.ID, Succeeded)
+	for {
+		if stats := m.Stats(); stats.Pending == 0 && stats.Running == 0 && stats.Tenants == 0 {
+			break
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatalf("tenant reservations not released: %+v", m.Stats())
+		}
+	}
+	t.Logf("ACC-10: A accepted=%d after initial %d, rejected=%d; B claimed after %d A tasks", accepted.Load(), config.TenantPendingLimit, rejected.Load(), aBeforeB)
+}
+
 func TestTenantPendingLimitRejectsWithoutPartialWorkflow(t *testing.T) {
 	config := DefaultConfig()
 	config.Workers = 1

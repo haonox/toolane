@@ -6,7 +6,7 @@ Toolane 负责接收工具任务、限制并发、组织显式依赖、管理执
 
 项目名由 Tool 与 Lane 组合。GitHub 仓库名称：`toolane`。
 
-> V0.1 的单机闭环已可运行，Linux 自动化验收已覆盖 ACC-01～07。V0.2 的 DAG、进程内模拟租户配额与轮询调度已有实现和测试，FIFO 对比实验可复现；阶段确认仍待审查。
+> V0.1 的单机闭环已可运行，Linux 自动化验收覆盖 ACC-01～07。V0.2 的 DAG、进程内模拟租户配额、轮询调度与 FIFO 对比实验已实现，ACC-08～10 自动化验收通过。
 
 ## 项目目标
 
@@ -70,6 +70,7 @@ Process Executor 只运行可信工具；Docker 版本针对常见资源滥用�
 | [doc/V0.1-TECHNICAL-REPORT.md](./doc/V0.1-TECHNICAL-REPORT.md) | 当前实现的架构、执行语义、代码审查路线与已知边界 |
 | [docs/V0.2-DAG.md](./docs/V0.2-DAG.md) | V0.2 第一批 DAG 接口、状态与验证范围 |
 | [docs/V0.2-SCHEDULER.md](./docs/V0.2-SCHEDULER.md) | 租户配额、轮询调度、测试与 FIFO 对比实验 |
+| [docs/V0.2-ACCEPTANCE.md](./docs/V0.2-ACCEPTANCE.md) | V0.2 阶段验收命令、证据与边界 |
 
 **协作 AI 开始工作前须读取上述两份文档与本 README。** 未指定阶段时只开发 V0.1；不要提前实现整条路线。
 
