@@ -13,6 +13,31 @@ var ErrIdempotencyConflict = errors.New("idempotency key reused with different r
 
 const idempotencyLifetime = 24 * time.Hour
 
+// ResolveIdempotency checks an unexpired key without creating a task. Admission
+// must still use CreateIdempotentExecution so the database constraint decides
+// any race between this check and the write.
+func (s *Store) ResolveIdempotency(ctx context.Context, tenantID, endpoint, key string, normalizedRequest []byte) (id string, found bool, err error) {
+	var oldHash []byte
+	var expiresAtNS int64
+	err = s.db.QueryRowContext(ctx, `SELECT request_hash, execution_id, expires_at_ns
+		FROM idempotency WHERE tenant_id = ? AND endpoint = ? AND key = ?`, tenantID, endpoint, key).
+		Scan(&oldHash, &id, &expiresAtNS)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if expiresAtNS <= time.Now().UnixNano() {
+		return "", false, nil
+	}
+	hash := sha256.Sum256(normalizedRequest)
+	if !bytes.Equal(oldHash, hash[:]) {
+		return "", false, ErrIdempotencyConflict
+	}
+	return id, true, nil
+}
+
 // CreateIdempotentExecution atomically creates an execution, its first event,
 // and a scoped idempotency record. record.Request must be the validated,
 // normalized request encoding; the store hashes those exact bytes. A live key

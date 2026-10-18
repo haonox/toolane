@@ -10,9 +10,11 @@ Toolane 负责接收工具任务、限制并发、组织显式依赖、管理执
 
 V0.3 已接入沙箱 CPU/内存的调度预留、固定镜像的 Docker Shell Executor 和按实例归属的有界残留回收。ACC-11～12 的自动化验收已在合并后的 `main` 上通过，记录见 [V0.3 验收](./docs/V0.3-ACCEPTANCE.md)。
 
-V1.0 的第一批增加了 [SQLite 存储基础](./docs/V1.0-SQLITE-FOUNDATION.md)：独占状态目录、版本化 schema，以及任务状态和事件的事务写入。Manager 尚未接入该存储，当前运行的任务仍是进程内状态。
+V1.0 的第一批增加了 [SQLite 存储基础](./docs/V1.0-SQLITE-FOUNDATION.md)：独占状态目录、版本化 schema，以及任务状态和事件的事务写入。该批先建立存储边界，单任务运行路径由第三批接入。
 
-第二批增加了 [存储层幂等准入](./docs/V1.0-IDEMPOTENCY.md)：同一租户、提交端点和键的并发重复提交只创建一条任务记录；请求不同则冲突，24 小时后可重用键。Manager 与 HTTP 接口尚未接入，因此当前运行路径仍不提供提交幂等。
+第二批增加了 [存储层幂等准入](./docs/V1.0-IDEMPOTENCY.md)：同一租户、提交端点和键的并发重复提交只创建一条任务记录；请求不同则冲突，24 小时后可重用键。其单任务 Manager 接入见第三批；HTTP 接口尚未实现。
+
+第三批增加了 [单任务持久化运行路径](./docs/V1.0-DURABLE-SINGLE.md)：`NewDurableManager` 在准入、认领和状态变化时写入 SQLite，重启前先确认资源回收，再续调未认领任务并中断旧的已认领任务。该模式现可通过 Go API 使用；CLI 仍使用内存模式，持久化 Workflow 和 HTTP/SSE 尚未实现。
 
 ## 项目目标
 
@@ -60,7 +62,7 @@ go test -race ./...
 go vet ./...
 ```
 
-演示提供 `mock.delay` 与 `process.printf`；调用方也可在服务端注册其他可信工具或 Docker Shell 工具。V0.2 的租户 ID 只由可信进程内调用方提供，不构成身份认证；可配置 `SchedulerFIFO` 作为实验基线。当前 Manager 的执行状态和结果仅保存在内存，进程退出后丢失；尚无 HTTP 服务，SQLite 存储基础尚未接入运行路径。Docker 仅面向 Linux 主机；服务启动时可按实例标签回收残留容器，删除失败会有界重试，调用方须保存稳定实例 ID 并在准入前调用恢复接口。Process Executor 与真实进程测试也以 Linux 为目标；其他平台会返回 `process_unsupported`。
+演示提供 `mock.delay` 与 `process.printf`；调用方也可在服务端注册其他可信工具或 Docker Shell 工具。V0.2 的租户 ID 只由可信进程内调用方提供，不构成身份认证；可配置 `SchedulerFIFO` 作为实验基线。CLI 使用的 `NewManager` 仍只保留内存状态；单任务可通过 `NewDurableManager` 使用 SQLite，但尚无 HTTP 服务。Docker 仅面向 Linux 主机；服务启动时可按实例标签回收残留容器，删除失败会有界重试，调用方须保存稳定实例 ID 并在准入前调用恢复接口。Process Executor 与真实进程测试也以 Linux 为目标；其他平台会返回 `process_unsupported`。
 
 ## 项目边界
 
@@ -85,6 +87,7 @@ Process Executor 只运行可信工具；Docker 版本针对常见资源滥用�
 | [docs/V0.3-ACCEPTANCE.md](./docs/V0.3-ACCEPTANCE.md) | V0.3 阶段验收证据与边界 |
 | [docs/V1.0-SQLITE-FOUNDATION.md](./docs/V1.0-SQLITE-FOUNDATION.md) | SQLite 驱动选择、Schema v1、事务边界与测试 |
 | [docs/V1.0-IDEMPOTENCY.md](./docs/V1.0-IDEMPOTENCY.md) | Schema v2、事务化幂等准入及验证范围 |
+| [docs/V1.0-DURABLE-SINGLE.md](./docs/V1.0-DURABLE-SINGLE.md) | 单任务持久化 Manager 的启动、准入、认领与重启语义 |
 
 **协作 AI 开始工作前须读取上述两份文档与本 README。** 未指定阶段时只开发 V0.1；不要提前实现整条路线。
 
