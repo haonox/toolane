@@ -126,8 +126,57 @@ func TestDockerSandboxOutputFlood(t *testing.T) {
 
 func TestDockerSandboxTimeout(t *testing.T) {
 	m := sandboxManager(t)
-	s := runScript(t, m, "sleep 30", 300*time.Millisecond, 0)
-	if s.State != execution.TimedOut || s.ErrorCode != "execution_timeout" || s.CleanupStatus != "succeeded" {
+	s := runScript(t, m, "sleep 30", 2*time.Second, 0)
+	if s.State != execution.TimedOut || s.ErrorCode != "execution_timeout" || s.CleanupStatus != "succeeded" || s.ProcessStartedAt == nil {
 		t.Fatalf("sandbox timeout not enforced: %+v", s)
+	}
+}
+
+func TestDockerSandboxOOM(t *testing.T) {
+	m := sandboxManager(t)
+	s := runScript(t, m, `awk 'BEGIN { for (i=0;;i++) a[i] = sprintf("%1000000d", i) }'`, 12*time.Second, 0)
+	if s.State != execution.Failed || s.ErrorCode != "resource_exhausted" || s.CleanupStatus != "succeeded" || s.ProcessStartedAt == nil {
+		t.Fatalf("container OOM not classified from runtime metadata: %+v", s)
+	}
+}
+
+func TestDockerRecoveryKeepsOtherInstance(t *testing.T) {
+	instance := fmt.Sprintf("it%x", time.Now().UnixNano())
+	other := instance + "other"
+	executionID := strings.Repeat("a", 32)
+	create := func(owner string) string {
+		t.Helper()
+		name := "toolane-" + owner + "-" + executionID
+		output, err := exec.Command("docker", "container", "create", "--pull=never", "--name="+name,
+			"--label=toolane.project=toolane", "--label=toolane.instance="+owner,
+			"--label=toolane.execution="+executionID, imageTag+"@"+imageDigest, "true").CombinedOutput()
+		if err != nil {
+			t.Fatalf("create recovery fixture: %v: %s", err, output)
+		}
+		id := strings.TrimSpace(string(output))
+		t.Cleanup(func() {
+			output, err := exec.Command("docker", "container", "rm", "--force", id).CombinedOutput()
+			if err != nil && !strings.Contains(strings.ToLower(string(output)), "no such container") {
+				t.Errorf("remove recovery fixture %s: %v: %s", id, err, output)
+			}
+		})
+		return id
+	}
+	ownedID := create(instance)
+	otherID := create(other)
+	backend, err := docker.NewBackend(docker.Spec{ImageTag: imageTag, ImageDigest: imageDigest, InstanceID: instance})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if err := backend.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("docker", "container", "inspect", ownedID).Run(); err == nil {
+		t.Fatal("owned residual container remained")
+	}
+	if err := exec.Command("docker", "container", "inspect", otherID).Run(); err != nil {
+		t.Fatalf("another instance's container was removed: %v", err)
 	}
 }

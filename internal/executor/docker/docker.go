@@ -97,11 +97,11 @@ func (s Spec) imageRef() string { return s.ImageTag + "@" + s.ImageDigest }
 // ScriptDefinition registers one fixed image and policy. The request contains
 // only a script; it cannot select image, flags, mounts, environment or limits.
 func ScriptDefinition(name string, spec Spec) (tool.Definition, error) {
-	s, err := spec.normalized()
+	backend, err := NewBackend(spec)
 	if err != nil {
 		return tool.Definition{}, err
 	}
-	return scriptDefinition(name, s, commandCLI{binary: s.DockerBinary})
+	return backend.Definition(name)
 }
 
 func scriptDefinition(name string, spec Spec, cli dockerCLI) (tool.Definition, error) {

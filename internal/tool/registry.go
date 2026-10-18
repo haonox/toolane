@@ -17,6 +17,7 @@ type RunOptions struct {
 	MaxOutputBytes   int
 	OnOutputLimit    func()
 	OnProcessStarted func(time.Time)
+	OnCleanupUpdate  func(status, message string)
 	SandboxResources Resources
 	ExecutionID      string
 }
