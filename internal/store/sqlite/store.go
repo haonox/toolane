@@ -23,7 +23,7 @@ var (
 	ErrNewerSchema     = errors.New("database schema is newer than this binary")
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 // Execution contains the data required to reconstruct one execution. Snapshot
 // and Request are JSON encoded by the manager; the store treats them as bytes.
@@ -178,6 +178,25 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			}
 		}
 	}
+	if version < 2 {
+		for _, statement := range []string{
+			`CREATE TABLE idempotency (
+				tenant_id TEXT NOT NULL,
+				endpoint TEXT NOT NULL,
+				key TEXT NOT NULL,
+				request_hash BLOB NOT NULL CHECK (length(request_hash) = 32),
+				execution_id TEXT NOT NULL REFERENCES executions(id) ON DELETE RESTRICT,
+				expires_at_ns INTEGER NOT NULL,
+				PRIMARY KEY (tenant_id, endpoint, key)
+			)`,
+			"CREATE INDEX idempotency_by_execution ON idempotency (execution_id)",
+			"PRAGMA user_version = 2",
+		} {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("migrate database: %w", err)
+			}
+		}
+	}
 	return tx.Commit()
 }
 
@@ -196,14 +215,28 @@ func (s *Store) Close() error {
 // CreateExecution commits the accepted record and its first event together.
 // The caller must not acknowledge acceptance until this method succeeds.
 func (s *Store) CreateExecution(ctx context.Context, record Execution, event Event) error {
-	if record.ID == "" || record.TenantID == "" || record.State == "" || len(record.Snapshot) == 0 || len(record.Request) == 0 || record.CreatedAt.IsZero() || event.Kind == "" || event.OccurredAt.IsZero() || event.ExecutionID != "" || event.Sequence != 0 {
-		return errors.New("incomplete execution or event")
+	if err := validateCreate(record, event); err != nil {
+		return err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err := insertExecution(ctx, tx, record, event); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func validateCreate(record Execution, event Event) error {
+	if record.ID == "" || record.TenantID == "" || record.State == "" || len(record.Snapshot) == 0 || len(record.Request) == 0 || record.CreatedAt.IsZero() || event.Kind == "" || event.OccurredAt.IsZero() || event.ExecutionID != "" || event.Sequence != 0 {
+		return errors.New("incomplete execution or event")
+	}
+	return nil
+}
+
+func insertExecution(ctx context.Context, tx *sql.Tx, record Execution, event Event) error {
 	if _, err := tx.ExecContext(ctx, `INSERT INTO executions
 		(id, tenant_id, state, snapshot, request, created_at_ns, version)
 		VALUES (?, ?, ?, ?, ?, ?, 1)`, record.ID, record.TenantID, record.State, record.Snapshot, record.Request, record.CreatedAt.UnixNano()); err != nil {
@@ -214,7 +247,7 @@ func (s *Store) CreateExecution(ctx context.Context, record Execution, event Eve
 		VALUES (?, 1, ?, ?, ?)`, record.ID, event.Kind, event.Payload, event.OccurredAt.UnixNano()); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return nil
 }
 
 // Transition atomically replaces the snapshot and appends its state event.
