@@ -17,3 +17,5 @@ coverage.out
 # Editors and operating systems
 .idea/
 .DS_Store
+__pycache__/
+*.pyc
