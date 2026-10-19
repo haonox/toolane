@@ -296,3 +296,111 @@ func TestDurableWorkflowRecoveryFinishesAcceptedCancellation(t *testing.T) {
 		t.Fatalf("cancel recovery: %+v calls=%d err=%v", got, calls.Load(), err)
 	}
 }
+
+func TestDurableWorkflowIdempotencyBeforeCapacityAndAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "state")
+	s := openDurableStore(t, dir)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	registry := durableRegistry(t, func(ctx context.Context, _ json.RawMessage, _ tool.RunOptions) (tool.Outcome, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return tool.Outcome{}, ctx.Err()
+			}
+		}
+		return tool.Outcome{}, nil
+	})
+	config := DefaultConfig()
+	config.Workers = 1
+	config.QueueCapacity = 2
+	m, err := NewDurableManager(ctx, config, registry, s, func(context.Context, []RecoveryResource) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := WorkflowRequest{Nodes: []WorkflowNode{
+		{ID: "root", Tool: "test", Arguments: json.RawMessage(`{"b":2,"a":1}`)},
+		{ID: "child", Tool: "test", DependsOn: []string{"root"}},
+	}}
+	first, err := m.SubmitWorkflowIdempotent(ctx, request, "key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	queued, err := m.SubmitIdempotent(ctx, Request{Tool: "test"}, "key") // Same key, different endpoint.
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Nodes[0].Arguments = json.RawMessage(`{ "a": 1, "b": 2 }`)
+	request.Nodes[0].QueueTimeout = config.DefaultQueueTimeout
+	request.Nodes[0].ExecutionTimeout = config.DefaultRunTimeout
+	replay, err := m.SubmitWorkflowIdempotent(ctx, request, "key")
+	if err != nil || replay.ID != first.ID {
+		t.Fatalf("replay while queue full: id=%q want=%q err=%v", replay.ID, first.ID, err)
+	}
+	request.Nodes[0].Arguments = json.RawMessage(`{"a":9}`)
+	if _, err := m.SubmitWorkflowIdempotent(ctx, request, "key"); !errors.Is(err, sqlite.ErrIdempotencyConflict) {
+		t.Fatalf("different workflow under same key: %v", err)
+	}
+	close(release)
+	awaitWorkflow(t, m, first.ID, Succeeded)
+	awaitState(t, m, queued.ID, Succeeded)
+	if calls.Load() != 3 {
+		t.Fatalf("executor calls=%d, want 3", calls.Load())
+	}
+	closeDurableManager(t, m)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s = openDurableStore(t, dir)
+	defer s.Close()
+	m, err = NewDurableManager(ctx, config, registry, s, func(context.Context, []RecoveryResource) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeDurableManager(t, m)
+	request.Nodes[0].Arguments = json.RawMessage(`{"a":1,"b":2}`)
+	replay, err = m.SubmitWorkflowIdempotent(ctx, request, "key")
+	if err != nil || replay.ID != first.ID || calls.Load() != 3 {
+		t.Fatalf("replay after restart: id=%q calls=%d err=%v", replay.ID, calls.Load(), err)
+	}
+}
+
+func TestNormalizedWorkflowDependencyOrder(t *testing.T) {
+	config := DefaultConfig()
+	registry := durableRegistry(t, func(context.Context, json.RawMessage, tool.RunOptions) (tool.Outcome, error) {
+		return tool.Outcome{}, nil
+	})
+	m, err := newManager(config, registry, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := WorkflowRequest{Nodes: []WorkflowNode{
+		{ID: "a", Tool: "test"}, {ID: "b", Tool: "test"},
+		{ID: "join", Tool: "test", DependsOn: []string{"a", "b"}},
+	}}
+	prepare := func() []preparedRequest {
+		result := make([]preparedRequest, len(request.Nodes))
+		for i, node := range request.Nodes {
+			var err error
+			result[i], err = m.prepareRequest(context.Background(), Request{Tool: node.Tool})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		return result
+	}
+	first, err := encodeNormalizedWorkflowRequest(request, prepare())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Nodes[2].DependsOn = []string{"b", "a"}
+	second, err := encodeNormalizedWorkflowRequest(request, prepare())
+	if err != nil || string(first) != string(second) {
+		t.Fatalf("dependency order changed normalized request: first=%s second=%s err=%v", first, second, err)
+	}
+}

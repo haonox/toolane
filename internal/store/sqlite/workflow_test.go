@@ -164,6 +164,9 @@ func TestSchemaV2MigratesWithExistingExecutionAndIdempotency(t *testing.T) {
 	if _, _, err := s.CreateIdempotentExecution(ctx, executionEndpoint, "key", record, event); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.db.ExecContext(ctx, "DROP TABLE workflow_idempotency"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.db.ExecContext(ctx, "DROP TABLE workflow_nodes"); err != nil {
 		t.Fatal(err)
 	}

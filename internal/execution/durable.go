@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 )
 
 const executionEndpoint = "POST /api/v1/executions"
+const workflowEndpoint = "POST /api/v1/workflows"
 
 type storedRecord struct {
 	Snapshot  Snapshot          `json:"snapshot"`
@@ -124,6 +126,28 @@ func encodeNormalizedRequest(p preparedRequest) ([]byte, error) {
 	})
 }
 
+func encodeNormalizedWorkflowRequest(req WorkflowRequest, prepared []preparedRequest) ([]byte, error) {
+	type normalizedNode struct {
+		ID        string          `json:"node_id"`
+		DependsOn []string        `json:"depends_on"`
+		Execution json.RawMessage `json:"execution"`
+	}
+	value := struct {
+		TenantID string           `json:"tenant_id"`
+		Nodes    []normalizedNode `json:"nodes"`
+	}{TenantID: prepared[0].request.TenantID, Nodes: make([]normalizedNode, len(req.Nodes))}
+	for i, node := range req.Nodes {
+		encoded, err := encodeNormalizedRequest(prepared[i])
+		if err != nil {
+			return nil, err
+		}
+		dependsOn := append([]string{}, node.DependsOn...)
+		sort.Strings(dependsOn)
+		value.Nodes[i] = normalizedNode{ID: node.ID, DependsOn: dependsOn, Execution: encoded}
+	}
+	return json.Marshal(value)
+}
+
 func encodeStoredExecution(r *record, next Snapshot) ([]byte, error) {
 	value := storedRecord{Snapshot: next, Arguments: r.arguments, Deadline: r.deadline, Resource: r.resource}
 	value.Limits.QueueTimeout = next.QueueTimeout
@@ -221,25 +245,25 @@ func (m *Manager) createStoredExecutionLocked(ctx context.Context, r *record, re
 	return r.snapshot.ID, false, nil
 }
 
-func (m *Manager) createStoredWorkflowLocked(ctx context.Context, request WorkflowRequest, prepared []preparedRequest, w *workflow) error {
+func (m *Manager) createStoredWorkflowLocked(ctx context.Context, request WorkflowRequest, prepared []preparedRequest, w *workflow, key string, normalizedRequest []byte) (string, bool, error) {
 	encodedRequest, err := json.Marshal(request)
 	if err != nil {
-		return err
+		return "", false, err
 	}
 	stored := sqlite.Workflow{ID: w.id, TenantID: w.tenantID, State: string(w.state), Request: encodedRequest, CreatedAt: w.createdAt}
 	stored.Nodes = make([]sqlite.WorkflowNode, len(w.nodes))
 	for i, r := range w.nodes {
 		encoded, err := encodeStoredExecution(r, r.snapshot)
 		if err != nil {
-			return err
+			return "", false, err
 		}
 		normalized, err := encodeNormalizedRequest(prepared[i])
 		if err != nil {
-			return err
+			return "", false, err
 		}
 		event, err := stateEvent(r.snapshot, w.createdAt)
 		if err != nil {
-			return err
+			return "", false, err
 		}
 		stored.Nodes[i] = sqlite.WorkflowNode{
 			NodeID: request.Nodes[i].ID, DependsOn: request.Nodes[i].DependsOn,
@@ -247,15 +271,27 @@ func (m *Manager) createStoredWorkflowLocked(ctx context.Context, request Workfl
 			Event:     event,
 		}
 	}
-	if err := m.store.CreateWorkflow(ctx, stored); err != nil {
-		m.haltStoreLocked(err)
-		return err
+	var id string
+	var reused bool
+	if key == "" {
+		err = m.store.CreateWorkflow(ctx, stored)
+	} else {
+		id, reused, err = m.store.CreateIdempotentWorkflow(ctx, workflowEndpoint, key, stored, normalizedRequest)
+	}
+	if err != nil {
+		if !errors.Is(err, sqlite.ErrIdempotencyConflict) {
+			m.haltStoreLocked(err)
+		}
+		return "", false, err
+	}
+	if reused {
+		return id, true, nil
 	}
 	w.version = 1
 	for _, r := range w.nodes {
 		r.version = 1
 	}
-	return nil
+	return w.id, false, nil
 }
 
 func (m *Manager) transitionWorkflowLocked(w *workflow, state State, finishedAt *time.Time) error {

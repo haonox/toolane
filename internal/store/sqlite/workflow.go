@@ -36,28 +36,43 @@ type WorkflowNode struct {
 // CreateWorkflow commits the workflow, every node execution, and each first
 // event in one transaction. A failed node write leaves no accepted batch.
 func (s *Store) CreateWorkflow(ctx context.Context, record Workflow) error {
-	if record.ID == "" || record.TenantID == "" || record.State == "" || len(record.Request) == 0 || record.CreatedAt.IsZero() || record.FinishedAt != nil || len(record.Nodes) == 0 {
-		return errors.New("incomplete workflow")
-	}
-	dependencies := make([][]byte, len(record.Nodes))
-	for i, node := range record.Nodes {
-		if node.NodeID == "" || node.Execution.TenantID != record.TenantID {
-			return errors.New("incomplete workflow node")
-		}
-		if err := validateCreate(node.Execution, node.Event); err != nil {
-			return err
-		}
-		var err error
-		dependencies[i], err = json.Marshal(node.DependsOn)
-		if err != nil {
-			return err
-		}
+	dependencies, err := validateWorkflowCreate(record)
+	if err != nil {
+		return err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err := insertWorkflow(ctx, tx, record, dependencies); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func validateWorkflowCreate(record Workflow) ([][]byte, error) {
+	if record.ID == "" || record.TenantID == "" || record.State == "" || len(record.Request) == 0 || record.CreatedAt.IsZero() || record.FinishedAt != nil || len(record.Nodes) == 0 {
+		return nil, errors.New("incomplete workflow")
+	}
+	dependencies := make([][]byte, len(record.Nodes))
+	for i, node := range record.Nodes {
+		if node.NodeID == "" || node.Execution.TenantID != record.TenantID {
+			return nil, errors.New("incomplete workflow node")
+		}
+		if err := validateCreate(node.Execution, node.Event); err != nil {
+			return nil, err
+		}
+		var err error
+		dependencies[i], err = json.Marshal(node.DependsOn)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return dependencies, nil
+}
+
+func insertWorkflow(ctx context.Context, tx *sql.Tx, record Workflow, dependencies [][]byte) error {
 	if _, err := tx.ExecContext(ctx, `INSERT INTO workflows
 		(id, tenant_id, state, request, created_at_ns, version)
 		VALUES (?, ?, ?, ?, ?, 1)`, record.ID, record.TenantID, record.State, record.Request, record.CreatedAt.UnixNano()); err != nil {
@@ -73,7 +88,7 @@ func (s *Store) CreateWorkflow(ctx context.Context, record Workflow) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 // GetWorkflow reads one committed batch and its initial node events from a

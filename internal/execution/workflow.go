@@ -60,6 +60,19 @@ type terminalGroup struct {
 // SubmitWorkflow validates all nodes before atomically accepting the batch.
 // Blocked nodes count toward the same pending capacity as ready nodes.
 func (m *Manager) SubmitWorkflow(ctx context.Context, req WorkflowRequest) (WorkflowSnapshot, error) {
+	return m.submitWorkflow(ctx, req, "")
+}
+
+// SubmitWorkflowIdempotent scopes key to the trusted tenant and workflow
+// submission endpoint. A live equivalent key returns the original batch.
+func (m *Manager) SubmitWorkflowIdempotent(ctx context.Context, req WorkflowRequest, key string) (WorkflowSnapshot, error) {
+	if m.store == nil || key == "" {
+		return WorkflowSnapshot{}, errors.New("idempotent workflow submission requires a durable manager and nonempty key")
+	}
+	return m.submitWorkflow(ctx, req, key)
+}
+
+func (m *Manager) submitWorkflow(ctx context.Context, req WorkflowRequest, key string) (WorkflowSnapshot, error) {
 	dependencies, err := m.validateWorkflow(req)
 	if err != nil {
 		return WorkflowSnapshot{}, err
@@ -80,6 +93,13 @@ func (m *Manager) SubmitWorkflow(ctx context.Context, req WorkflowRequest) (Work
 			return WorkflowSnapshot{}, err
 		}
 	}
+	var normalizedRequest []byte
+	if key != "" {
+		normalizedRequest, err = encodeNormalizedWorkflowRequest(req, prepared)
+		if err != nil {
+			return WorkflowSnapshot{}, err
+		}
+	}
 	workflowID, err := newID()
 	if err != nil {
 		return WorkflowSnapshot{}, err
@@ -88,6 +108,18 @@ func (m *Manager) SubmitWorkflow(ctx context.Context, req WorkflowRequest) (Work
 	defer m.mu.Unlock()
 	if err := m.admissionError(ctx); err != nil {
 		return WorkflowSnapshot{}, err
+	}
+	if key != "" {
+		oldID, found, err := m.store.ResolveWorkflowIdempotency(ctx, prepared[0].request.TenantID, workflowEndpoint, key, normalizedRequest)
+		if err != nil {
+			if !errors.Is(err, sqlite.ErrIdempotencyConflict) && ctx.Err() == nil {
+				m.haltStoreLocked(err)
+			}
+			return WorkflowSnapshot{}, err
+		}
+		if found {
+			return m.getWorkflowLocked(oldID)
+		}
 	}
 	if len(req.Nodes) > m.config.QueueCapacity-m.pending {
 		return WorkflowSnapshot{}, ErrQueueFull
@@ -117,8 +149,12 @@ func (m *Manager) SubmitWorkflow(ctx context.Context, req WorkflowRequest) (Work
 	if m.store != nil {
 		persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := m.createStoredWorkflowLocked(persistCtx, req, prepared, w); err != nil {
+		oldID, reused, err := m.createStoredWorkflowLocked(persistCtx, req, prepared, w, key, normalizedRequest)
+		if err != nil {
 			return WorkflowSnapshot{}, err
+		}
+		if reused {
+			return m.getWorkflowLocked(oldID)
 		}
 	}
 	m.workflows[workflowID] = w
@@ -233,6 +269,10 @@ func (m *Manager) validateWorkflow(req WorkflowRequest) ([][]int, error) {
 func (m *Manager) GetWorkflow(id string) (WorkflowSnapshot, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.getWorkflowLocked(id)
+}
+
+func (m *Manager) getWorkflowLocked(id string) (WorkflowSnapshot, error) {
 	w, ok := m.workflows[id]
 	if !ok {
 		if m.store == nil {
