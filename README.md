@@ -42,6 +42,8 @@ V1.0 的第一批增加了 [SQLite 存储基础](./docs/V1.0-SQLITE-FOUNDATION.m
 
 第十六批增加 [本地 HTTP 服务负载实验](./docs/V1.0-HTTP-EXPERIMENT.md)：使用临时服务和三租户 Mock 工作负载记录四类场景的准入、终态、延迟及资源快照，原始数据和复现命令随仓库保存。
 
+V1.0 的 [最终验收记录](./docs/V1.0-ACCEPTANCE.md)汇总 ACC-13～17、真实服务进程崩溃恢复、Docker 集成测试和负载实验的证据与边界。
+
 ## 项目目标
 
 - **调度**：有界队列、并发配额、DAG 依赖与租户公平调度。
@@ -127,6 +129,7 @@ Process Executor 只运行可信工具；Docker 版本针对常见资源滥用�
 | [docs/V1.0-STRUCTURED-LOGS.md](./docs/V1.0-STRUCTURED-LOGS.md) | 服务 JSON 日志字段、隐私边界与日志丢弃策略 |
 | [docs/V1.0-PYTHON-EXAMPLE.md](./docs/V1.0-PYTHON-EXAMPLE.md) | Python 标准库调用示例与本地运行方法 |
 | [docs/V1.0-HTTP-EXPERIMENT.md](./docs/V1.0-HTTP-EXPERIMENT.md) | Mock HTTP 服务负载实验的方法、数据与适用范围 |
+| [docs/V1.0-ACCEPTANCE.md](./docs/V1.0-ACCEPTANCE.md) | V1.0 验收矩阵、命令、真实 Docker 结果及结果边界 |
 
 **协作 AI 开始工作前须读取上述两份文档与本 README。** 未指定阶段时只开发 V0.1；不要提前实现整条路线。
 
