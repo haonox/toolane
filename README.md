@@ -26,6 +26,8 @@ V1.0 的第一批增加了 [SQLite 存储基础](./docs/V1.0-SQLITE-FOUNDATION.m
 
 第八批增加 [持久化记录保留与容量控制](./docs/V1.0-DURABLE-RETENTION.md)：默认保留终态记录和事件 7 天、最多保存 10000 条 Execution；清理保护活动任务、待清理资源与有效幂等键，Workflow 按整批删除。容量被保护记录占满时拒绝新提交。
 
+第九批增加 [本地 HTTP API](./docs/V1.0-HTTP-API.md)：`toolane serve` 使用私有配置文件中的 Token 确定租户和允许工具，提供单任务及 Workflow 的提交、查询、取消接口与健康检查。当前服务只注册 `mock.delay`；SSE 和 Docker 服务装配仍在后续批次。
+
 ## 项目目标
 
 - **调度**：有界队列、并发配额、DAG 依赖与租户公平调度。
@@ -52,6 +54,7 @@ V1.0 的第一批增加了 [SQLite 存储基础](./docs/V1.0-SQLITE-FOUNDATION.m
 ```bash
 go run ./cmd/toolane
 go run ./cmd/toolane process
+go run ./cmd/toolane serve --config /absolute/path/server.json
 ```
 
 当前可在 Go 进程内注册工具并调用 `Submit`、`Get`、`Cancel` 和 `Close`。Manager 使用固定 Worker、有界待启动容量、默认按租户轮询的就绪调度与一个排队期限监视器；运行取消或超时后，等待 Executor 返回才释放槽位。默认限制为 4 个 Worker、256 个全局待启动任务、每租户 2 个运行槽位和 64 个待启动节点、30 秒排队期限、10 秒执行期限、256 KiB 参数、64 KiB 结构化结果、stdout/stderr 共享 1 MiB 原始字节预算、256 字节 Agent ID、4 KiB 错误摘要，以及保留 1000 个终态记录。请求可在配置上限内收紧期限和输出预算。
@@ -72,7 +75,7 @@ go test -race ./...
 go vet ./...
 ```
 
-演示提供 `mock.delay` 与 `process.printf`；调用方也可在服务端注册其他可信工具或 Docker Shell 工具。V0.2 的租户 ID 只由可信进程内调用方提供，不构成身份认证；可配置 `SchedulerFIFO` 作为实验基线。CLI 使用的 `NewManager` 仍只保留内存状态；单任务与 Workflow 可通过 `NewDurableManager` 使用 SQLite，但尚无 HTTP 服务。Docker 仅面向 Linux 主机；服务启动时可按实例标签回收残留容器，删除失败会有界重试，调用方须保存稳定实例 ID 并在准入前调用恢复接口。Process Executor 与真实进程测试也以 Linux 为目标；其他平台会返回 `process_unsupported`。
+演示提供 `mock.delay` 与 `process.printf`；调用方也可在服务端注册其他可信工具或 Docker Shell 工具。V0.2 的租户 ID 只由可信进程内调用方提供，不构成身份认证；可配置 `SchedulerFIFO` 作为实验基线。CLI 演示使用的 `NewManager` 仍只保留内存状态；`toolane serve` 使用 SQLite 和 Token 身份映射，当前仅开放 Mock 工具的本地 HTTP API。Docker 仅面向 Linux 主机；服务启动时可按实例标签回收残留容器，删除失败会有界重试，调用方须保存稳定实例 ID 并在准入前调用恢复接口。Process Executor 与真实进程测试也以 Linux 为目标；其他平台会返回 `process_unsupported`。
 
 ## 项目边界
 
@@ -102,6 +105,8 @@ Process Executor 只运行可信工具；Docker 版本针对常见资源滥用�
 | [docs/V1.0-WORKFLOW-STORE.md](./docs/V1.0-WORKFLOW-STORE.md) | Schema v3、Workflow 整批事务准入与重启读取 |
 | [docs/V1.0-DURABLE-WORKFLOW.md](./docs/V1.0-DURABLE-WORKFLOW.md) | 持久化 DAG 的调度、取消与重启恢复语义 |
 | [docs/V1.0-WORKFLOW-IDEMPOTENCY.md](./docs/V1.0-WORKFLOW-IDEMPOTENCY.md) | Schema v4、Workflow 幂等键的作用域、规范化与事务准入 |
+| [docs/V1.0-DURABLE-RETENTION.md](./docs/V1.0-DURABLE-RETENTION.md) | 持久化期限和容量清理、保护规则与验证 |
+| [docs/V1.0-HTTP-API.md](./docs/V1.0-HTTP-API.md) | 本地服务配置、Token 租户身份与已实现的 HTTP 接口 |
 
 **协作 AI 开始工作前须读取上述两份文档与本 README。** 未指定阶段时只开发 V0.1；不要提前实现整条路线。
 

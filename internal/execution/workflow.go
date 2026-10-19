@@ -75,7 +75,7 @@ func (m *Manager) SubmitWorkflowIdempotent(ctx context.Context, req WorkflowRequ
 func (m *Manager) submitWorkflow(ctx context.Context, req WorkflowRequest, key string) (WorkflowSnapshot, error) {
 	dependencies, err := m.validateWorkflow(req)
 	if err != nil {
-		return WorkflowSnapshot{}, err
+		return WorkflowSnapshot{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 	}
 	prepared := make([]preparedRequest, len(req.Nodes))
 	ids := make([]string, len(req.Nodes))

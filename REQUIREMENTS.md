@@ -275,13 +275,13 @@ Process Executor 的进程组停止只能用于可信程序。程序主动脱离
 | GET | `/healthz` | 服务存活检查 |
 | GET | `/readyz` | 恢复完成且核心依赖可用时就绪 |
 
-请求示例为设计契约，服务尚未实现：
+请求示例为接口契约；当前本地服务只注册 `mock.delay`，SSE 与其他执行后端的服务装配仍在后续批次：
 
 ```json
 {
   "agent_id": "demo-agent",
-  "tool": "python.execute",
-  "arguments": {"code": "print('hello from Toolane')"},
+  "tool": "mock.delay",
+  "arguments": {"delay_ms": 100, "value": "hello from Toolane"},
   "queue_timeout_ms": 30000,
   "execution_timeout_ms": 10000
 }
