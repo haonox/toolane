@@ -32,6 +32,8 @@ V1.0 的第一批增加了 [SQLite 存储基础](./docs/V1.0-SQLITE-FOUNDATION.m
 
 第十一批接入 [Docker HTTP 服务](./docs/V1.0-DOCKER-HTTP.md)：配置固定镜像和稳定实例 ID 后，可通过 Token 调用 `sandbox.shell`。服务先回收本实例容器、核对持久化资源并检查 Docker 隔离条件，再开放 HTTP 准入；状态目录固定实例 ID，防止重启时漏扫旧实例。
 
+第十二批增加 [本地管理指标](./docs/V1.0-METRICS.md)：可选的独立回环地址管理端口提供有界标签的 Prometheus 文本指标，覆盖 HTTP 准入、任务终态、排队与执行耗时、清理失败及当前运行和残留资源。业务端口不开放指标路径。
+
 ## 项目目标
 
 - **调度**：有界队列、并发配额、DAG 依赖与租户公平调度。
@@ -112,6 +114,7 @@ Process Executor 只运行可信工具；Docker 版本针对常见资源滥用�
 | [docs/V1.0-DURABLE-RETENTION.md](./docs/V1.0-DURABLE-RETENTION.md) | 持久化期限和容量清理、保护规则与验证 |
 | [docs/V1.0-HTTP-API.md](./docs/V1.0-HTTP-API.md) | 本地服务配置、Token 租户身份与已实现的 HTTP 接口 |
 | [docs/V1.0-DOCKER-HTTP.md](./docs/V1.0-DOCKER-HTTP.md) | Docker HTTP 服务配置、启动恢复、请求示例与真实容器验证 |
+| [docs/V1.0-METRICS.md](./docs/V1.0-METRICS.md) | 独立管理端口、指标语义与安全边界 |
 
 **协作 AI 开始工作前须读取上述两份文档与本 README。** 未指定阶段时只开发 V0.1；不要提前实现整条路线。
 

@@ -19,6 +19,7 @@ import (
 	"github.com/haonox/toolane/internal/executor/docker"
 	"github.com/haonox/toolane/internal/executor/mock"
 	"github.com/haonox/toolane/internal/httpapi"
+	"github.com/haonox/toolane/internal/observability"
 	"github.com/haonox/toolane/internal/store/sqlite"
 	"github.com/haonox/toolane/internal/tool"
 )
@@ -29,6 +30,7 @@ type serverConfig struct {
 	Tokens         []httpapi.Token     `json:"tokens"`
 	SSETenantLimit int                 `json:"sse_tenant_limit"`
 	SSEGlobalLimit int                 `json:"sse_global_limit"`
+	MetricsListen  string              `json:"metrics_listen,omitempty"`
 	Docker         *serverDockerConfig `json:"docker,omitempty"`
 }
 
@@ -101,6 +103,16 @@ func loadServerConfig(path string) (serverConfig, error) {
 	if config.SSETenantLimit < 1 || config.SSEGlobalLimit < config.SSETenantLimit {
 		return serverConfig{}, errors.New("invalid SSE connection limits")
 	}
+	if config.MetricsListen != "" {
+		metricsHost, metricsPort, err := net.SplitHostPort(config.MetricsListen)
+		if err != nil || metricsHost != "localhost" && (net.ParseIP(metricsHost) == nil || !net.ParseIP(metricsHost).IsLoopback()) {
+			return serverConfig{}, errors.New("metrics listen address must use localhost or a loopback IP and a port")
+		}
+		metricsPortNumber, err := strconv.Atoi(metricsPort)
+		if err != nil || metricsPortNumber < 0 || metricsPortNumber > 65535 {
+			return serverConfig{}, errors.New("invalid metrics listen port")
+		}
+	}
 	if config.Docker != nil && (config.Docker.ImageTag == "" || config.Docker.ImageDigest == "" || config.Docker.InstanceID == "") {
 		return serverConfig{}, errors.New("Docker image tag, digest and stable instance ID are required")
 	}
@@ -155,6 +167,7 @@ func runServer(ctx context.Context, configPath string) (retErr error) {
 	if err := checkDockerInstanceBinding(config.StateDir, config.Docker); err != nil {
 		return err
 	}
+	metrics := &observability.Recorder{}
 	manager, err := execution.NewDurableManager(ctx, execution.DefaultConfig(), registry, store,
 		func(ctx context.Context, resources []execution.RecoveryResource) error {
 			if err := recoverServerResources(ctx, dockerBackend, config.Docker, resources); err != nil {
@@ -164,6 +177,10 @@ func runServer(ctx context.Context, configPath string) (retErr error) {
 				return bindDockerInstance(config.StateDir, config.Docker.InstanceID)
 			}
 			return nil
+		}, func(before, after execution.Snapshot) {
+			metrics.RecordChange(observability.Change{BeforeState: string(before.State), AfterState: string(after.State),
+				BeforeCleanup: before.CleanupStatus, AfterCleanup: after.CleanupStatus, CreatedAt: after.CreatedAt,
+				RunningAt: after.RunningAt, ProcessStartedAt: after.ProcessStartedAt, FinishedAt: after.FinishedAt})
 		})
 	if err != nil {
 		return err
@@ -179,24 +196,62 @@ func runServer(ctx context.Context, configPath string) (retErr error) {
 	if err != nil {
 		return err
 	}
+	api.EnableMetrics(metrics)
 	listener, err := net.Listen("tcp", config.Listen)
 	if err != nil {
 		return err
 	}
+	var metricsListener net.Listener
+	var metricsServer *http.Server
+	if config.MetricsListen != "" {
+		metricsListener, err = net.Listen("tcp", config.MetricsListen)
+		if err != nil {
+			_ = listener.Close()
+			return fmt.Errorf("listen for management metrics: %w", err)
+		}
+		metricsMux := http.NewServeMux()
+		metricsMux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
+			stats := manager.Stats()
+			gauges := observability.Gauges{Queued: stats.Queued, Blocked: stats.Blocked, Pending: stats.Pending, Running: stats.Running,
+				Stored: stats.Stored, ReservedCPUMilli: stats.ReservedSandboxCPUMilli,
+				ReservedMemoryBytes: stats.ReservedSandboxMemoryBytes, Halted: stats.Halted}
+			if dockerBackend != nil {
+				gauges.Residual, gauges.ResidualBlocked, _ = dockerBackend.RecoveryStatus()
+			}
+			var output bytes.Buffer
+			if err := metrics.WritePrometheus(&output, gauges); err != nil {
+				http.Error(w, "metrics unavailable", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+			_, _ = w.Write(output.Bytes())
+		})
+		metricsServer = &http.Server{Handler: metricsMux, ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 8 * 1024}
+	}
 	server := &http.Server{Handler: api, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		IdleTimeout: 60 * time.Second, MaxHeaderBytes: 8 * 1024}
-	served := make(chan error, 1)
+	served := make(chan error, 2)
 	go func() { served <- server.Serve(listener) }()
+	if metricsServer != nil {
+		go func() { served <- metricsServer.Serve(metricsListener) }()
+	}
 	fmt.Printf("Toolane HTTP ready at %s\n", listener.Addr())
+	if metricsListener != nil {
+		fmt.Printf("Toolane metrics ready at %s\n", metricsListener.Addr())
+	}
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		retErr = errors.Join(retErr, server.Shutdown(shutdownCtx))
 	case err := <-served:
 		if !errors.Is(err, http.ErrServerClosed) {
 			retErr = errors.Join(retErr, err)
 		}
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	retErr = errors.Join(retErr, server.Shutdown(shutdownCtx))
+	if metricsServer != nil {
+		retErr = errors.Join(retErr, metricsServer.Shutdown(shutdownCtx))
 	}
 	return retErr
 }

@@ -226,6 +226,7 @@ type Stats struct {
 // executor must stop its work before returning after cancellation.
 type Manager struct {
 	mu                         sync.Mutex
+	transitionObserver         func(Snapshot, Snapshot)
 	cond                       *sync.Cond
 	config                     Config
 	store                      *sqlite.Store
