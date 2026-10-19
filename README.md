@@ -26,9 +26,11 @@ V1.0 的第一批增加了 [SQLite 存储基础](./docs/V1.0-SQLITE-FOUNDATION.m
 
 第八批增加 [持久化记录保留与容量控制](./docs/V1.0-DURABLE-RETENTION.md)：默认保留终态记录和事件 7 天、最多保存 10000 条 Execution；清理保护活动任务、待清理资源与有效幂等键，Workflow 按整批删除。容量被保护记录占满时拒绝新提交。
 
-第九批增加 [本地 HTTP API](./docs/V1.0-HTTP-API.md)：`toolane serve` 使用私有配置文件中的 Token 确定租户和允许工具，提供单任务及 Workflow 的提交、查询、取消接口与健康检查。当前服务只注册 `mock.delay`；Docker 服务装配仍在后续批次。
+第九批增加 [本地 HTTP API](./docs/V1.0-HTTP-API.md)：`toolane serve` 使用私有配置文件中的 Token 确定租户和允许工具，提供单任务及 Workflow 的提交、查询、取消接口与健康检查。
 
 第十批增加 [执行事件 SSE](./docs/V1.0-SSE.md)：按任务回放 SQLite 事件并订阅新事件，支持 `Last-Event-ID`、租户隔离、连接上限和慢客户端写入期限；输出按有限大小分块记录，终态以 `end` 事件通知。
+
+第十一批接入 [Docker HTTP 服务](./docs/V1.0-DOCKER-HTTP.md)：配置固定镜像和稳定实例 ID 后，可通过 Token 调用 `sandbox.shell`。服务先回收本实例容器、核对持久化资源并检查 Docker 隔离条件，再开放 HTTP 准入；状态目录固定实例 ID，防止重启时漏扫旧实例。
 
 ## 项目目标
 
@@ -67,7 +69,7 @@ go run ./cmd/toolane serve --config /absolute/path/server.json
 
 Process Executor 只运行服务端显式注册且标为可信的绝对路径程序，用参数数组启动，不调用 Shell。Linux 下为进程建立独立进程组；取消、超时或输出达到上限时先发送 SIGTERM，宽限期后发送 SIGKILL，并限制等待继承管道的时间。若进程组停止无法确认，Manager 保留运行预留、暂停新任务准入并报告关闭错误。这个机制仅适用于可信程序，不是安全沙箱。CLI 的 `process` 演示运行系统 `printf`；没有任意命令执行入口。
 
-Docker Executor 通过进程内工具注册使用；管理员必须指定已在本地存在的镜像标签、SHA-256 digest 和部署实例 ID。它在启动前检查 Docker cgroup v2、seccomp 和实际容器配置；任务只能提交 Shell 脚本，不能指定镜像、网络、挂载或权限。容器默认无网络，以非 root 运行，使用只读根目录和有大小限制的 tmpfs 工作区。用法、策略与测试命令见 [V0.3 Docker Executor 说明](./docs/V0.3-DOCKER-EXECUTOR.md)。CLI 尚未提供 Docker 演示入口。
+Docker Executor 可通过进程内工具注册或 `toolane serve` 的固定配置使用；管理员必须指定已在本地存在的镜像标签、SHA-256 digest 和部署实例 ID。它在启动前检查 Docker cgroup v2、seccomp 和实际容器配置；任务只能提交 Shell 脚本，不能指定镜像、网络、挂载或权限。容器默认无网络，以非 root 运行，使用只读根目录和有大小限制的 tmpfs 工作区。用法与策略见 [V0.3 Docker Executor 说明](./docs/V0.3-DOCKER-EXECUTOR.md)，服务配置见 [Docker HTTP 服务](./docs/V1.0-DOCKER-HTTP.md)。CLI 演示命令尚未提供 Docker 入口。
 
 运行检查：
 
@@ -77,7 +79,7 @@ go test -race ./...
 go vet ./...
 ```
 
-演示提供 `mock.delay` 与 `process.printf`；调用方也可在服务端注册其他可信工具或 Docker Shell 工具。V0.2 的租户 ID 只由可信进程内调用方提供，不构成身份认证；可配置 `SchedulerFIFO` 作为实验基线。CLI 演示使用的 `NewManager` 仍只保留内存状态；`toolane serve` 使用 SQLite 和 Token 身份映射，当前仅开放 Mock 工具的本地 HTTP API。Docker 仅面向 Linux 主机；服务启动时可按实例标签回收残留容器，删除失败会有界重试，调用方须保存稳定实例 ID 并在准入前调用恢复接口。Process Executor 与真实进程测试也以 Linux 为目标；其他平台会返回 `process_unsupported`。
+演示提供 `mock.delay` 与 `process.printf`；调用方也可在服务端注册其他可信工具或 Docker Shell 工具。V0.2 的租户 ID 只由可信进程内调用方提供，不构成身份认证；可配置 `SchedulerFIFO` 作为实验基线。CLI 演示使用的 `NewManager` 仍只保留内存状态；`toolane serve` 使用 SQLite 和 Token 身份映射，按配置开放 Mock 与 Docker Shell 工具的本地 HTTP API。Docker 仅面向 Linux 主机；服务启动时按实例标签回收残留容器，删除失败会有界重试。Process Executor 与真实进程测试也以 Linux 为目标；其他平台会返回 `process_unsupported`。
 
 ## 项目边界
 
@@ -109,6 +111,7 @@ Process Executor 只运行可信工具；Docker 版本针对常见资源滥用�
 | [docs/V1.0-WORKFLOW-IDEMPOTENCY.md](./docs/V1.0-WORKFLOW-IDEMPOTENCY.md) | Schema v4、Workflow 幂等键的作用域、规范化与事务准入 |
 | [docs/V1.0-DURABLE-RETENTION.md](./docs/V1.0-DURABLE-RETENTION.md) | 持久化期限和容量清理、保护规则与验证 |
 | [docs/V1.0-HTTP-API.md](./docs/V1.0-HTTP-API.md) | 本地服务配置、Token 租户身份与已实现的 HTTP 接口 |
+| [docs/V1.0-DOCKER-HTTP.md](./docs/V1.0-DOCKER-HTTP.md) | Docker HTTP 服务配置、启动恢复、请求示例与真实容器验证 |
 
 **协作 AI 开始工作前须读取上述两份文档与本 README。** 未指定阶段时只开发 V0.1；不要提前实现整条路线。
 

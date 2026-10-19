@@ -32,6 +32,7 @@ var (
 	instancePattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 	digestPattern      = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 	executionIDPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
+	containerIDPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 )
 
 // Spec is entirely administrator-owned. InstanceID must remain stable across
