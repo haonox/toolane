@@ -173,6 +173,49 @@ func (b *Backend) Recover(ctx context.Context) error {
 	return nil
 }
 
+// Check verifies the configured image and daemon isolation features before a
+// service opens sandbox admission. Recover must run first.
+func (b *Backend) Check(ctx context.Context) error {
+	b.mu.Lock()
+	ready := b.initialized && !b.closed && !b.overflow
+	b.mu.Unlock()
+	if !ready {
+		return errors.New("Docker backend must recover before preflight")
+	}
+	_, err := (&runner{spec: b.spec, cli: b.cli}).preflight(ctx)
+	return err
+}
+
+// ConfirmRecoveredResource checks a persisted container ID independently of
+// the label scan. A missing container is safe; an existing one must still
+// belong to this execution and be stopped. This catches changed labels that
+// would otherwise make a persisted resource invisible to Recover.
+func (b *Backend) ConfirmRecoveredResource(ctx context.Context, executionID string, ref tool.ResourceRef) error {
+	if !executionIDPattern.MatchString(executionID) || ref.Kind != tool.ResourceDockerContainer ||
+		ref.InstanceID != b.spec.InstanceID || !containerIDPattern.MatchString(ref.ID) {
+		return errors.New("invalid persisted Docker resource ownership")
+	}
+	r := &runner{spec: b.spec, cli: b.cli}
+	info, err := r.inspect(ctx, ref.ID)
+	if isNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect persisted sandbox: %w", err)
+	}
+	name := "toolane-" + b.spec.InstanceID + "-" + executionID
+	if info.ID != ref.ID {
+		return errors.New("persisted sandbox ID does not match inspection")
+	}
+	if err := r.verifyOwnership(info, name, executionID); err != nil {
+		return fmt.Errorf("persisted sandbox ownership: %w", err)
+	}
+	if info.State.Running {
+		return errors.New("persisted sandbox is still running after recovery")
+	}
+	return nil
+}
+
 func (b *Backend) schedule(item residual) bool {
 	b.mu.Lock()
 	if b.closed {

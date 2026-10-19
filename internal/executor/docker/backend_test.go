@@ -117,6 +117,56 @@ func TestRecoverRejectsUnconfirmedStop(t *testing.T) {
 	}
 }
 
+func TestConfirmRecoveredResourceChecksPersistedID(t *testing.T) {
+	s := testSpec(t)
+	id := strings.Repeat("d", 64)
+	info := ownedInfo(s, id, testExecutionID, false)
+	f := &recoveryCLI{containers: map[string]containerInfo{id: info}}
+	b := newBackend(s, f)
+	ref := tool.ResourceRef{Kind: tool.ResourceDockerContainer, ID: id, InstanceID: s.InstanceID}
+	if err := b.ConfirmRecoveredResource(context.Background(), testExecutionID, ref); err != nil {
+		t.Fatalf("stopped owned container rejected: %v", err)
+	}
+	info.Config.Labels["toolane.instance"] = "other"
+	f.containers[id] = info
+	if err := b.ConfirmRecoveredResource(context.Background(), testExecutionID, ref); err == nil {
+		t.Fatal("persisted ID with changed ownership labels accepted")
+	}
+	info.Config.Labels["toolane.instance"] = s.InstanceID
+	info.State.Running = true
+	f.containers[id] = info
+	if err := b.ConfirmRecoveredResource(context.Background(), testExecutionID, ref); err == nil {
+		t.Fatal("running persisted container accepted")
+	}
+	delete(f.containers, id)
+	if err := b.ConfirmRecoveredResource(context.Background(), testExecutionID, ref); err != nil {
+		t.Fatalf("absent persisted container rejected: %v", err)
+	}
+	ref.InstanceID = "other"
+	if err := b.ConfirmRecoveredResource(context.Background(), testExecutionID, ref); err == nil {
+		t.Fatal("foreign instance reference accepted")
+	}
+}
+
+func TestCheckRequiresRecoveryAndImage(t *testing.T) {
+	s := testSpec(t)
+	f := &fakeCLI{info: secureInfo(s)}
+	b := newBackend(s, f)
+	if err := b.Check(context.Background()); err == nil {
+		t.Fatal("preflight accepted before recovery")
+	}
+	if err := b.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Check(context.Background()); err != nil {
+		t.Fatalf("valid daemon policy rejected: %v", err)
+	}
+	f.info.Image = ""
+	if err := b.Check(context.Background()); err == nil {
+		t.Fatal("missing image accepted")
+	}
+}
+
 func TestUnavailableRecoveryRejectsExecutionBeforeCreate(t *testing.T) {
 	s := testSpec(t)
 	f := &recoveryCLI{listErr: errors.New("daemon unreachable")}
