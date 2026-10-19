@@ -24,7 +24,7 @@ var (
 	ErrRuntimeOwned    = errors.New("store already has a runtime owner")
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 // Execution contains the data required to reconstruct one execution. Snapshot
 // and Request are JSON encoded by the manager; the store treats them as bytes.
@@ -221,6 +221,25 @@ func migrate(ctx context.Context, db *sql.DB) error {
 				UNIQUE (workflow_id, position)
 			)`,
 			"PRAGMA user_version = 3",
+		} {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("migrate database: %w", err)
+			}
+		}
+	}
+	if version < 4 {
+		for _, statement := range []string{
+			`CREATE TABLE workflow_idempotency (
+				tenant_id TEXT NOT NULL,
+				endpoint TEXT NOT NULL,
+				key TEXT NOT NULL,
+				request_hash BLOB NOT NULL CHECK (length(request_hash) = 32),
+				workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE RESTRICT,
+				expires_at_ns INTEGER NOT NULL,
+				PRIMARY KEY (tenant_id, endpoint, key)
+			)`,
+			"CREATE INDEX workflow_idempotency_by_workflow ON workflow_idempotency (workflow_id)",
+			"PRAGMA user_version = 4",
 		} {
 			if _, err := tx.ExecContext(ctx, statement); err != nil {
 				return fmt.Errorf("migrate database: %w", err)

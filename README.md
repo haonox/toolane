@@ -22,6 +22,8 @@ V1.0 的第一批增加了 [SQLite 存储基础](./docs/V1.0-SQLITE-FOUNDATION.m
 
 第六批接入 [持久化 Workflow 运行与恢复](./docs/V1.0-DURABLE-WORKFLOW.md)：`NewDurableManager` 可执行静态 DAG；节点状态、事件及工作流汇总状态落盘。重启时重建依赖，继续未认领节点，已认领节点标记为 `interrupted`，独立分支继续执行。
 
+第七批增加 [Workflow 幂等提交](./docs/V1.0-WORKFLOW-IDEMPOTENCY.md)：`SubmitWorkflowIdempotent` 将整批 DAG 与幂等键在一个事务中提交；有效键的等价请求在容量已满或服务重启后仍返回原工作流。
+
 ## 项目目标
 
 - **调度**：有界队列、并发配额、DAG 依赖与租户公平调度。
@@ -97,6 +99,7 @@ Process Executor 只运行可信工具；Docker 版本针对常见资源滥用�
 | [docs/V1.0-DOCKER-OWNERSHIP.md](./docs/V1.0-DOCKER-OWNERSHIP.md) | Docker 容器 ID 落盘顺序、标签兜底与恢复测试 |
 | [docs/V1.0-WORKFLOW-STORE.md](./docs/V1.0-WORKFLOW-STORE.md) | Schema v3、Workflow 整批事务准入与重启读取 |
 | [docs/V1.0-DURABLE-WORKFLOW.md](./docs/V1.0-DURABLE-WORKFLOW.md) | 持久化 DAG 的调度、取消与重启恢复语义 |
+| [docs/V1.0-WORKFLOW-IDEMPOTENCY.md](./docs/V1.0-WORKFLOW-IDEMPOTENCY.md) | Schema v4、Workflow 幂等键的作用域、规范化与事务准入 |
 
 **协作 AI 开始工作前须读取上述两份文档与本 README。** 未指定阶段时只开发 V0.1；不要提前实现整条路线。
 
