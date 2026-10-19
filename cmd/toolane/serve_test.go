@@ -26,12 +26,13 @@ func TestLoadServerConfigRequiresPrivateLoopbackConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	config, err := loadServerConfig(path)
-	if err != nil || config.Listen != "127.0.0.1:0" || config.StateDir != stateDir || len(config.Tokens) != 1 {
+	if err != nil || config.Listen != "127.0.0.1:0" || config.StateDir != stateDir || len(config.Tokens) != 1 || config.SSETenantLimit != 8 || config.SSEGlobalLimit != 64 {
 		t.Fatalf("valid config: %+v err=%v", config, err)
 	}
 	for _, raw := range []string{
 		strings.Replace(valid, "127.0.0.1:0", "0.0.0.0:8080", 1),
 		strings.Replace(valid, "mock.delay", "process.printf", 1),
+		strings.Replace(valid, `"tokens":`, `"sse_tenant_limit":9,"sse_global_limit":8,"tokens":`, 1),
 		valid + `{}`,
 	} {
 		if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
@@ -99,10 +100,27 @@ func TestRunServerStartsAndStopsLocalDurableAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = io.Copy(io.Discard, response.Body)
+	var accepted struct {
+		ExecutionID string `json:"execution_id"`
+	}
+	decodeErr := json.NewDecoder(response.Body).Decode(&accepted)
 	_ = response.Body.Close()
-	if response.StatusCode != http.StatusAccepted {
-		t.Fatalf("HTTP submission status=%d", response.StatusCode)
+	if response.StatusCode != http.StatusAccepted || decodeErr != nil || accepted.ExecutionID == "" {
+		t.Fatalf("HTTP submission status=%d id=%q err=%v", response.StatusCode, accepted.ExecutionID, decodeErr)
+	}
+	eventsRequest, err := http.NewRequest(http.MethodGet, base+"/api/v1/executions/"+accepted.ExecutionID+"/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventsRequest.Header.Set("Authorization", "Bearer local-test-secret-123456")
+	eventsResponse, err := client.Do(eventsRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, readErr := io.ReadAll(eventsResponse.Body)
+	_ = eventsResponse.Body.Close()
+	if eventsResponse.StatusCode != http.StatusOK || readErr != nil || !strings.Contains(string(events), "event: end\n") {
+		t.Fatalf("HTTP event stream status=%d body=%q err=%v", eventsResponse.StatusCode, events, readErr)
 	}
 	cancel()
 	select {

@@ -328,8 +328,22 @@ func insertExecution(ctx context.Context, tx *sql.Tx, record Execution, event Ev
 // Transition atomically replaces the snapshot and appends its state event.
 // expectedVersion prevents a stale caller from overwriting a newer decision.
 func (s *Store) Transition(ctx context.Context, id string, expectedVersion int64, state string, snapshot []byte, event Event) (int64, error) {
+	return s.TransitionWithEvents(ctx, id, expectedVersion, state, snapshot, nil, event)
+}
+
+// TransitionWithEvents commits output chunks and their resulting snapshot and
+// state event together. A crash cannot expose output without its final record.
+func (s *Store) TransitionWithEvents(ctx context.Context, id string, expectedVersion int64, state string, snapshot []byte, output []Event, event Event) (int64, error) {
 	if id == "" || expectedVersion < 1 || state == "" || len(snapshot) == 0 || event.Kind == "" || event.OccurredAt.IsZero() || event.ExecutionID != "" || event.Sequence != 0 {
 		return 0, errors.New("incomplete transition or event")
+	}
+	if len(output) > 1024 {
+		return 0, errors.New("too many output events")
+	}
+	for _, item := range output {
+		if item.Kind != "output" || item.OccurredAt.IsZero() || len(item.Payload) == 0 || item.ExecutionID != "" || item.Sequence != 0 {
+			return 0, errors.New("invalid output event")
+		}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -358,6 +372,14 @@ func (s *Store) Transition(ctx context.Context, id string, expectedVersion int64
 	var sequence int64
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence), 0) + 1 FROM execution_events WHERE execution_id = ?`, id).Scan(&sequence); err != nil {
 		return 0, err
+	}
+	for _, item := range output {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO execution_events
+			(execution_id, sequence, kind, payload, occurred_at_ns)
+			VALUES (?, ?, ?, ?, ?)`, id, sequence, item.Kind, item.Payload, item.OccurredAt.UnixNano()); err != nil {
+			return 0, err
+		}
+		sequence++
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO execution_events
 		(execution_id, sequence, kind, payload, occurred_at_ns)
@@ -415,6 +437,40 @@ func (s *Store) EventsAfter(ctx context.Context, executionID string, after int64
 	}
 	defer rows.Close()
 	var events []Event
+	for rows.Next() {
+		var event Event
+		var occurredAtNS int64
+		if err := rows.Scan(&event.Sequence, &event.Kind, &event.Payload, &occurredAtNS); err != nil {
+			return nil, err
+		}
+		event.ExecutionID = executionID
+		event.OccurredAt = time.Unix(0, occurredAtNS).UTC()
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+// EventBounds reports the retained range and row count after a cursor. The
+// count lets a stream reject missing history before writing HTTP headers.
+func (s *Store) EventBounds(ctx context.Context, executionID string, after int64) (first, last, remaining int64, err error) {
+	err = s.db.QueryRowContext(ctx, `SELECT COALESCE(MIN(sequence), 0), COALESCE(MAX(sequence), 0),
+		COUNT(*) FILTER (WHERE sequence > ?) FROM execution_events WHERE execution_id = ?`,
+		after, executionID).Scan(&first, &last, &remaining)
+	return
+}
+
+// EventsAfterLimit bounds a replay batch independently of the retained history.
+func (s *Store) EventsAfterLimit(ctx context.Context, executionID string, after int64, limit int) ([]Event, error) {
+	if after < 0 || limit < 1 || limit > 256 {
+		return nil, errors.New("invalid event cursor or batch limit")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT sequence, kind, payload, occurred_at_ns FROM execution_events
+		WHERE execution_id = ? AND sequence > ? ORDER BY sequence LIMIT ?`, executionID, after, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	events := make([]Event, 0, limit)
 	for rows.Next() {
 		var event Event
 		var occurredAtNS int64

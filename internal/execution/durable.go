@@ -425,12 +425,14 @@ func (m *Manager) applySnapshotKindLocked(r *record, next Snapshot, kind string)
 		event.Kind = kind
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		version, err := m.store.Transition(ctx, next.ID, r.version, string(next.State), encoded, event)
+		version, err := m.store.TransitionWithEvents(ctx, next.ID, r.version, string(next.State), encoded, r.outputEvents, event)
 		if err != nil {
 			m.haltStoreLocked(err)
 			return err
 		}
 		r.version = version
+		r.outputEvents = nil
+		m.notifyEventsLocked(next.ID)
 	}
 	r.snapshot = next
 	return nil
@@ -478,6 +480,7 @@ func (m *Manager) resourceCreated(r *record, ref tool.ResourceRef) error {
 			return err
 		}
 		r.version = version
+		m.notifyEventsLocked(next.ID)
 	}
 	r.resource = &ref
 	r.snapshot = next

@@ -197,6 +197,7 @@ type record struct {
 	arguments       json.RawMessage
 	deadline        time.Time
 	version         int64
+	outputEvents    []sqlite.Event
 	resource        *tool.ResourceRef
 	cancel          context.CancelFunc
 	tenant          *tenantState
@@ -228,6 +229,7 @@ type Manager struct {
 	cond                       *sync.Cond
 	config                     Config
 	store                      *sqlite.Store
+	eventWatchers              map[string]map[chan struct{}]struct{}
 	storeError                 error
 	runtimeRelease             func()
 	tools                      map[string]tool.Definition
@@ -280,16 +282,17 @@ func newManager(config Config, registry *tool.Registry, store *sqlite.Store) (*M
 		policies[name] = policy
 	}
 	m := &Manager{
-		config:    config,
-		store:     store,
-		tools:     definitions,
-		policies:  policies,
-		records:   make(map[string]*record),
-		workflows: make(map[string]*workflow),
-		tenants:   make(map[string]*tenantState),
-		expiry:    make(chan struct{}, 1),
-		stop:      make(chan struct{}),
-		done:      make(chan struct{}),
+		config:        config,
+		store:         store,
+		eventWatchers: make(map[string]map[chan struct{}]struct{}),
+		tools:         definitions,
+		policies:      policies,
+		records:       make(map[string]*record),
+		workflows:     make(map[string]*workflow),
+		tenants:       make(map[string]*tenantState),
+		expiry:        make(chan struct{}, 1),
+		stop:          make(chan struct{}),
+		done:          make(chan struct{}),
 	}
 	m.cond = sync.NewCond(&m.mu)
 	return m, nil
@@ -733,7 +736,7 @@ func (m *Manager) finishWithSnapshotLocked(r *record, base Snapshot, state State
 	next.ErrorMessage = m.limitErrorMessage(message)
 	now := time.Now().UTC()
 	next.FinishedAt = &now
-	if err := m.applySnapshotLocked(r, next); err != nil {
+	if err := m.applySnapshotKindLocked(r, next, "end"); err != nil {
 		return err
 	}
 	r.arguments = nil

@@ -165,6 +165,12 @@ func (m *Manager) complete(r *record, ctx context.Context, outcome tool.Outcome,
 	}
 	next.Stdout = strings.ToValidUTF8(stdout, "?")
 	next.Stderr = strings.ToValidUTF8(stderr, "?")
+	outputEvents, outputErr := m.outputEventsLocked(next.Stdout, next.Stderr)
+	if outputErr != nil {
+		m.haltStoreLocked(outputErr)
+		return false
+	}
+	r.outputEvents = outputEvents
 	cleanupFinalized := outcome.CleanupStatus == "pending" && (next.CleanupStatus == "succeeded" || next.CleanupStatus == "failed")
 	if outcome.CleanupStatus != "" && !cleanupFinalized {
 		next.CleanupStatus = outcome.CleanupStatus

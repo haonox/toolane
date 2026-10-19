@@ -14,7 +14,7 @@ V1.0 的第一批增加了 [SQLite 存储基础](./docs/V1.0-SQLITE-FOUNDATION.m
 
 第二批增加了 [存储层幂等准入](./docs/V1.0-IDEMPOTENCY.md)：同一租户、提交端点和键的并发重复提交只创建一条任务记录；请求不同则冲突，24 小时后可重用键。其单任务 Manager 接入见第三批；HTTP 接口尚未实现。
 
-第三批增加了 [单任务持久化运行路径](./docs/V1.0-DURABLE-SINGLE.md)：`NewDurableManager` 在准入、认领和状态变化时写入 SQLite，重启前先确认资源回收，再续调未认领任务并中断旧的已认领任务。该模式现可通过 Go API 使用；CLI 仍使用内存模式，HTTP/SSE 尚未实现。
+第三批增加了 [单任务持久化运行路径](./docs/V1.0-DURABLE-SINGLE.md)：`NewDurableManager` 在准入、认领和状态变化时写入 SQLite，重启前先确认资源回收，再续调未认领任务并中断旧的已认领任务。该模式现可通过 Go API 使用；CLI 演示仍使用内存模式。
 
 第四批补充 [Docker 资源归属持久化](./docs/V1.0-DOCKER-OWNERSHIP.md)：容器创建后、启动前先记录容器 ID 与部署实例 ID；重启恢复回调收到这些记录，同时仍需扫描归属标签来覆盖 ID 尚未落盘的崩溃窗口。真实 Docker 恢复测试需在可访问 Docker daemon 的环境运行。
 
@@ -26,7 +26,9 @@ V1.0 的第一批增加了 [SQLite 存储基础](./docs/V1.0-SQLITE-FOUNDATION.m
 
 第八批增加 [持久化记录保留与容量控制](./docs/V1.0-DURABLE-RETENTION.md)：默认保留终态记录和事件 7 天、最多保存 10000 条 Execution；清理保护活动任务、待清理资源与有效幂等键，Workflow 按整批删除。容量被保护记录占满时拒绝新提交。
 
-第九批增加 [本地 HTTP API](./docs/V1.0-HTTP-API.md)：`toolane serve` 使用私有配置文件中的 Token 确定租户和允许工具，提供单任务及 Workflow 的提交、查询、取消接口与健康检查。当前服务只注册 `mock.delay`；SSE 和 Docker 服务装配仍在后续批次。
+第九批增加 [本地 HTTP API](./docs/V1.0-HTTP-API.md)：`toolane serve` 使用私有配置文件中的 Token 确定租户和允许工具，提供单任务及 Workflow 的提交、查询、取消接口与健康检查。当前服务只注册 `mock.delay`；Docker 服务装配仍在后续批次。
+
+第十批增加 [执行事件 SSE](./docs/V1.0-SSE.md)：按任务回放 SQLite 事件并订阅新事件，支持 `Last-Event-ID`、租户隔离、连接上限和慢客户端写入期限；输出按有限大小分块记录，终态以 `end` 事件通知。
 
 ## 项目目标
 
