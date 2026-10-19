@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -174,7 +176,8 @@ func TestRunServerStartsAndStopsLocalDurableAPI(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- runServer(ctx, path) }()
+	var logs bytes.Buffer
+	go func() { done <- runServerWithLogger(ctx, path, slog.New(slog.NewJSONHandler(&logs, nil))) }()
 	client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: time.Second}
 	base := "http://" + address
 	deadline := time.Now().Add(3 * time.Second)
@@ -273,5 +276,32 @@ func TestRunServerStartsAndStopsLocalDurableAPI(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("server did not stop")
+	}
+	logText := logs.String()
+	if strings.Contains(logText, "local-test-secret-123456") {
+		t.Fatal("service logs contain a credential")
+	}
+	seen := make(map[string]bool)
+	for _, line := range strings.Split(strings.TrimSpace(logText), "\n") {
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("invalid service JSON log: %v", err)
+		}
+		seen[entry["msg"].(string)] = true
+		if entry["msg"] == "http_request" && entry["execution_id"] == accepted.ExecutionID {
+			if entry["tenant_id"] != "local" || entry["request_id"] == "" {
+				t.Fatalf("submission log is not correlated: %+v", entry)
+			}
+		}
+		if entry["msg"] == "execution_transition" && entry["execution_id"] == accepted.ExecutionID {
+			if entry["tenant_id"] != "local" || entry["to_state"] == "" {
+				t.Fatalf("transition log is not correlated: %+v", entry)
+			}
+		}
+	}
+	for _, message := range []string{"recovery_complete", "service_ready", "metrics_ready", "http_request", "execution_transition"} {
+		if !seen[message] {
+			t.Fatalf("missing %s log: %s", message, logText)
+		}
 	}
 }

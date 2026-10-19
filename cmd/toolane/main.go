@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -27,7 +28,7 @@ func main() {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		if err := runServer(ctx, os.Args[3]); err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			slog.New(slog.NewJSONHandler(os.Stderr, nil)).Error("service_failed", "error", err)
 			os.Exit(1)
 		}
 		return

@@ -81,6 +81,9 @@ func (a *API) streamExecution(w http.ResponseWriter, r *http.Request, p principa
 		writeError(w, r, http.StatusNotFound, "not_found", "execution not found")
 		return
 	}
+	if trace := traceOf(r); trace != nil {
+		trace.executionID = snapshot.ID
+	}
 	after, err := lastEventID(r)
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "invalid_event_id", "invalid Last-Event-ID")
