@@ -49,6 +49,7 @@ type Change struct {
 // Gauges are live values gathered immediately before rendering.
 type Gauges struct {
 	Queued, Blocked, Pending, Running, Stored, Residual int
+	Goroutines                                          int
 	ReservedCPUMilli                                    int
 	ReservedMemoryBytes                                 int64
 	Halted, ResidualBlocked                             bool
@@ -177,7 +178,7 @@ func (r *Recorder) WritePrometheus(w io.Writer, gauges Gauges) error {
 		name  string
 		value any
 	}{{"queued", gauges.Queued}, {"blocked", gauges.Blocked}, {"pending", gauges.Pending}, {"running", gauges.Running}, {"stored", gauges.Stored},
-		{"residual_containers", gauges.Residual}, {"reserved_cpu_millicores", gauges.ReservedCPUMilli},
+		{"residual_containers", gauges.Residual}, {"goroutines", gauges.Goroutines}, {"reserved_cpu_millicores", gauges.ReservedCPUMilli},
 		{"reserved_memory_bytes", gauges.ReservedMemoryBytes}, {"halted", boolInt(gauges.Halted)},
 		{"residual_blocked", boolInt(gauges.ResidualBlocked)}} {
 		if err := write("# TYPE toolane_%s gauge\ntoolane_%s %v\n", item.name, item.name, item.value); err != nil {

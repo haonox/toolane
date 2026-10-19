@@ -1,0 +1,446 @@
+[
+  {
+    "scenario": "short",
+    "repetition": 1,
+    "accepted": 72,
+    "rejected": 0,
+    "rejection_ratio": 0.0,
+    "terminal_statuses": {
+      "cancelled": 0,
+      "failed": 0,
+      "interrupted": 0,
+      "skipped": 0,
+      "succeeded": 72,
+      "timed_out": 0
+    },
+    "completed_per_second": 344.498,
+    "max_schedule_lag_ms": 0.729,
+    "queue_ms": {
+      "p50": 0.278,
+      "p95": 0.397,
+      "p99": 1.098
+    },
+    "ready_wait_ms": {
+      "p50": null,
+      "p95": null,
+      "p99": null
+    },
+    "execution_ms": {
+      "p50": 2.909,
+      "p95": 3.301,
+      "p99": 3.423
+    },
+    "total_ms": {
+      "p50": 3.183,
+      "p95": 3.605,
+      "p99": 4.232
+    }
+  },
+  {
+    "scenario": "short",
+    "repetition": 2,
+    "accepted": 72,
+    "rejected": 0,
+    "rejection_ratio": 0.0,
+    "terminal_statuses": {
+      "cancelled": 0,
+      "failed": 0,
+      "interrupted": 0,
+      "skipped": 0,
+      "succeeded": 72,
+      "timed_out": 0
+    },
+    "completed_per_second": 342.857,
+    "max_schedule_lag_ms": 0.164,
+    "queue_ms": {
+      "p50": 0.255,
+      "p95": 0.359,
+      "p99": 0.507
+    },
+    "ready_wait_ms": {
+      "p50": null,
+      "p95": null,
+      "p99": null
+    },
+    "execution_ms": {
+      "p50": 2.718,
+      "p95": 3.325,
+      "p99": 3.375
+    },
+    "total_ms": {
+      "p50": 2.984,
+      "p95": 3.594,
+      "p99": 3.645
+    }
+  },
+  {
+    "scenario": "short",
+    "repetition": 3,
+    "accepted": 72,
+    "rejected": 0,
+    "rejection_ratio": 0.0,
+    "terminal_statuses": {
+      "cancelled": 0,
+      "failed": 0,
+      "interrupted": 0,
+      "skipped": 0,
+      "succeeded": 72,
+      "timed_out": 0
+    },
+    "completed_per_second": 349.515,
+    "max_schedule_lag_ms": 11.469,
+    "queue_ms": {
+      "p50": 0.142,
+      "p95": 0.584,
+      "p99": 1.455
+    },
+    "ready_wait_ms": {
+      "p50": null,
+      "p95": null,
+      "p99": null
+    },
+    "execution_ms": {
+      "p50": 2.771,
+      "p95": 3.625,
+      "p99": 4.006
+    },
+    "total_ms": {
+      "p50": 2.912,
+      "p95": 4.235,
+      "p99": 4.555
+    }
+  },
+  {
+    "scenario": "long",
+    "repetition": 1,
+    "accepted": 72,
+    "rejected": 0,
+    "rejection_ratio": 0.0,
+    "terminal_statuses": {
+      "cancelled": 0,
+      "failed": 0,
+      "interrupted": 0,
+      "skipped": 0,
+      "succeeded": 72,
+      "timed_out": 0
+    },
+    "completed_per_second": 233.01,
+    "max_schedule_lag_ms": 0.91,
+    "queue_ms": {
+      "p50": 71.22,
+      "p95": 139.334,
+      "p99": 150.443
+    },
+    "ready_wait_ms": {
+      "p50": null,
+      "p95": null,
+      "p99": null
+    },
+    "execution_ms": {
+      "p50": 15.683,
+      "p95": 16.374,
+      "p99": 16.604
+    },
+    "total_ms": {
+      "p50": 86.802,
+      "p95": 154.69,
+      "p99": 166.415
+    }
+  },
+  {
+    "scenario": "long",
+    "repetition": 2,
+    "accepted": 72,
+    "rejected": 0,
+    "rejection_ratio": 0.0,
+    "terminal_statuses": {
+      "cancelled": 0,
+      "failed": 0,
+      "interrupted": 0,
+      "skipped": 0,
+      "succeeded": 72,
+      "timed_out": 0
+    },
+    "completed_per_second": 212.389,
+    "max_schedule_lag_ms": 91.901,
+    "queue_ms": {
+      "p50": 29.695,
+      "p95": 69.781,
+      "p99": 75.125
+    },
+    "ready_wait_ms": {
+      "p50": null,
+      "p95": null,
+      "p99": null
+    },
+    "execution_ms": {
+      "p50": 15.958,
+      "p95": 16.806,
+      "p99": 16.896
+    },
+    "total_ms": {
+      "p50": 45.547,
+      "p95": 85.63,
+      "p99": 90.616
+    }
+  },
+  {
+    "scenario": "long",
+    "repetition": 3,
+    "accepted": 72,
+    "rejected": 0,
+    "rejection_ratio": 0.0,
+    "terminal_statuses": {
+      "cancelled": 0,
+      "failed": 0,
+      "interrupted": 0,
+      "skipped": 0,
+      "succeeded": 72,
+      "timed_out": 0
+    },
+    "completed_per_second": 202.247,
+    "max_schedule_lag_ms": 73.999,
+    "queue_ms": {
+      "p50": 47.224,
+      "p95": 86.721,
+      "p99": 94.055
+    },
+    "ready_wait_ms": {
+      "p50": null,
+      "p95": null,
+      "p99": null
+    },
+    "execution_ms": {
+      "p50": 16.046,
+      "p95": 16.681,
+      "p99": 17.154
+    },
+    "total_ms": {
+      "p50": 63.542,
+      "p95": 102.771,
+      "p99": 109.835
+    }
+  },
+  {
+    "scenario": "mixed",
+    "repetition": 1,
+    "accepted": 72,
+    "rejected": 0,
+    "rejection_ratio": 0.0,
+    "terminal_statuses": {
+      "cancelled": 0,
+      "failed": 0,
+      "interrupted": 0,
+      "skipped": 0,
+      "succeeded": 72,
+      "timed_out": 0
+    },
+    "completed_per_second": 334.884,
+    "max_schedule_lag_ms": 0.815,
+    "queue_ms": {
+      "p50": 15.186,
+      "p95": 40.468,
+      "p99": 43.691
+    },
+    "ready_wait_ms": {
+      "p50": null,
+      "p95": null,
+      "p99": null
+    },
+    "execution_ms": {
+      "p50": 3.704,
+      "p95": 16.073,
+      "p99": 16.626
+    },
+    "total_ms": {
+      "p50": 23.077,
+      "p95": 50.123,
+      "p99": 59.141
+    }
+  },
+  {
+    "scenario": "mixed",
+    "repetition": 2,
+    "accepted": 72,
+    "rejected": 0,
+    "rejection_ratio": 0.0,
+    "terminal_statuses": {
+      "cancelled": 0,
+      "failed": 0,
+      "interrupted": 0,
+      "skipped": 0,
+      "succeeded": 72,
+      "timed_out": 0
+    },
+    "completed_per_second": 373.057,
+    "max_schedule_lag_ms": 0.102,
+    "queue_ms": {
+      "p50": 21.277,
+      "p95": 36.148,
+      "p99": 38.72
+    },
+    "ready_wait_ms": {
+      "p50": null,
+      "p95": null,
+      "p99": null
+    },
+    "execution_ms": {
+      "p50": 3.152,
+      "p95": 16.055,
+      "p99": 16.664
+    },
+    "total_ms": {
+      "p50": 28.965,
+      "p95": 45.033,
+      "p99": 54.261
+    }
+  },
+  {
+    "scenario": "mixed",
+    "repetition": 3,
+    "accepted": 72,
+    "rejected": 0,
+    "rejection_ratio": 0.0,
+    "terminal_statuses": {
+      "cancelled": 0,
+      "failed": 0,
+      "interrupted": 0,
+      "skipped": 0,
+      "succeeded": 72,
+      "timed_out": 0
+    },
+    "completed_per_second": 378.947,
+    "max_schedule_lag_ms": 0.091,
+    "queue_ms": {
+      "p50": 7.487,
+      "p95": 27.433,
+      "p99": 36.62
+    },
+    "ready_wait_ms": {
+      "p50": null,
+      "p95": null,
+      "p99": null
+    },
+    "execution_ms": {
+      "p50": 3.536,
+      "p95": 16.116,
+      "p99": 16.462
+    },
+    "total_ms": {
+      "p50": 16.234,
+      "p95": 39.226,
+      "p99": 51.943
+    }
+  },
+  {
+    "scenario": "burst",
+    "repetition": 1,
+    "accepted": 72,
+    "rejected": 0,
+    "rejection_ratio": 0.0,
+    "terminal_statuses": {
+      "cancelled": 0,
+      "failed": 0,
+      "interrupted": 0,
+      "skipped": 0,
+      "succeeded": 72,
+      "timed_out": 0
+    },
+    "completed_per_second": 50.74,
+    "max_schedule_lag_ms": 82.733,
+    "queue_ms": {
+      "p50": 402.953,
+      "p95": 1192.551,
+      "p99": 1289.068
+    },
+    "ready_wait_ms": {
+      "p50": null,
+      "p95": null,
+      "p99": null
+    },
+    "execution_ms": {
+      "p50": 51.09,
+      "p95": 51.909,
+      "p99": 52.21
+    },
+    "total_ms": {
+      "p50": 453.724,
+      "p95": 1243.634,
+      "p99": 1339.786
+    }
+  },
+  {
+    "scenario": "burst",
+    "repetition": 2,
+    "accepted": 72,
+    "rejected": 0,
+    "rejection_ratio": 0.0,
+    "terminal_statuses": {
+      "cancelled": 0,
+      "failed": 0,
+      "interrupted": 0,
+      "skipped": 0,
+      "succeeded": 72,
+      "timed_out": 0
+    },
+    "completed_per_second": 49.315,
+    "max_schedule_lag_ms": 42.992,
+    "queue_ms": {
+      "p50": 405.96,
+      "p95": 1251.238,
+      "p99": 1320.348
+    },
+    "ready_wait_ms": {
+      "p50": null,
+      "p95": null,
+      "p99": null
+    },
+    "execution_ms": {
+      "p50": 51.256,
+      "p95": 51.818,
+      "p99": 52.896
+    },
+    "total_ms": {
+      "p50": 457.542,
+      "p95": 1302.583,
+      "p99": 1371.552
+    }
+  },
+  {
+    "scenario": "burst",
+    "repetition": 3,
+    "accepted": 72,
+    "rejected": 0,
+    "rejection_ratio": 0.0,
+    "terminal_statuses": {
+      "cancelled": 0,
+      "failed": 0,
+      "interrupted": 0,
+      "skipped": 0,
+      "succeeded": 72,
+      "timed_out": 0
+    },
+    "completed_per_second": 49.147,
+    "max_schedule_lag_ms": 71.222,
+    "queue_ms": {
+      "p50": 402.834,
+      "p95": 1204.348,
+      "p99": 1304.234
+    },
+    "ready_wait_ms": {
+      "p50": null,
+      "p95": null,
+      "p99": null
+    },
+    "execution_ms": {
+      "p50": 51.32,
+      "p95": 51.925,
+      "p99": 52.945
+    },
+    "total_ms": {
+      "p50": 454.285,
+      "p95": 1256.089,
+      "p99": 1355.751
+    }
+  }
+]

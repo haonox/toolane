@@ -1,0 +1,343 @@
+{
+  "generated_at": "2026-10-19T16:49:29.309169+00:00",
+  "experiment": "Mock HTTP service; no Docker",
+  "service_url": "http://127.0.0.1:37247",
+  "metrics_url": "http://127.0.0.1:59767",
+  "server_pid": 629154,
+  "python_version": "3.14.4",
+  "go_version": "go version go1.27.1 linux/amd64",
+  "platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.43",
+  "cpu_count": 6,
+  "cpu_model": "Intel(R) Core(TM) i5-8400 CPU @ 2.80GHz",
+  "git_revision": "ad0481e5ec77dc52a8a6ed92341bd95b2999f5f9",
+  "seed": 20261020,
+  "repetitions": 3,
+  "tasks_per_scenario": 72,
+  "warmup_tasks_per_repetition": 6,
+  "interval_ms": 2,
+  "arrival_model": "serial scheduled submissions; interval_ms except burst (zero); client request latency causes positive schedule lag",
+  "scenario_delays_ms": {
+    "short": 2,
+    "long": 15,
+    "mixed": [
+      2,
+      15
+    ],
+    "burst": 50
+  },
+  "poll_interval_ms": 20,
+  "wait_seconds": 30,
+  "notes": "Metrics and /proc samples taken before and after each measured batch; no credentials are stored.",
+  "batches": [
+    {
+      "scenario": "short",
+      "repetition": 1,
+      "before": {
+        "at": "2026-10-19T16:49:29.463185+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 0.02,
+        "rss_bytes": 15736832
+      },
+      "after": {
+        "at": "2026-10-19T16:49:29.702533+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 0.25,
+        "rss_bytes": 18903040
+      },
+      "elapsed_seconds": 0.209,
+      "accepted": 72,
+      "rejected": 0
+    },
+    {
+      "scenario": "short",
+      "repetition": 2,
+      "before": {
+        "at": "2026-10-19T16:49:29.871684+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 0.29,
+        "rss_bytes": 19124224
+      },
+      "after": {
+        "at": "2026-10-19T16:49:30.111938+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 0.5,
+        "rss_bytes": 21340160
+      },
+      "elapsed_seconds": 0.21,
+      "accepted": 72,
+      "rejected": 0
+    },
+    {
+      "scenario": "short",
+      "repetition": 3,
+      "before": {
+        "at": "2026-10-19T16:49:30.285587+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 0.56,
+        "rss_bytes": 20762624
+      },
+      "after": {
+        "at": "2026-10-19T16:49:30.507159+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 0.71,
+        "rss_bytes": 21377024
+      },
+      "elapsed_seconds": 0.206,
+      "accepted": 72,
+      "rejected": 0
+    },
+    {
+      "scenario": "long",
+      "repetition": 1,
+      "before": {
+        "at": "2026-10-19T16:49:30.661525+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 0.75,
+        "rss_bytes": 21590016
+      },
+      "after": {
+        "at": "2026-10-19T16:49:31.000396+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 1.01,
+        "rss_bytes": 22036480
+      },
+      "elapsed_seconds": 0.309,
+      "accepted": 72,
+      "rejected": 0
+    },
+    {
+      "scenario": "long",
+      "repetition": 2,
+      "before": {
+        "at": "2026-10-19T16:49:31.155298+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 1.04,
+        "rss_bytes": 22069248
+      },
+      "after": {
+        "at": "2026-10-19T16:49:31.524747+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 1.41,
+        "rss_bytes": 22261760
+      },
+      "elapsed_seconds": 0.339,
+      "accepted": 72,
+      "rejected": 0
+    },
+    {
+      "scenario": "long",
+      "repetition": 3,
+      "before": {
+        "at": "2026-10-19T16:49:31.703500+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 1.45,
+        "rss_bytes": 22286336
+      },
+      "after": {
+        "at": "2026-10-19T16:49:32.089080+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 1.85,
+        "rss_bytes": 22609920
+      },
+      "elapsed_seconds": 0.356,
+      "accepted": 72,
+      "rejected": 0
+    },
+    {
+      "scenario": "mixed",
+      "repetition": 1,
+      "before": {
+        "at": "2026-10-19T16:49:32.252860+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 1.89,
+        "rss_bytes": 22634496
+      },
+      "after": {
+        "at": "2026-10-19T16:49:32.498396+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 2.09,
+        "rss_bytes": 22667264
+      },
+      "elapsed_seconds": 0.215,
+      "accepted": 72,
+      "rejected": 0
+    },
+    {
+      "scenario": "mixed",
+      "repetition": 2,
+      "before": {
+        "at": "2026-10-19T16:49:32.663650+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 2.13,
+        "rss_bytes": 22691840
+      },
+      "after": {
+        "at": "2026-10-19T16:49:32.884690+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 2.23,
+        "rss_bytes": 23875584
+      },
+      "elapsed_seconds": 0.193,
+      "accepted": 72,
+      "rejected": 0
+    },
+    {
+      "scenario": "mixed",
+      "repetition": 3,
+      "before": {
+        "at": "2026-10-19T16:49:33.023886+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 2.24,
+        "rss_bytes": 24530944
+      },
+      "after": {
+        "at": "2026-10-19T16:49:33.220895+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 2.33,
+        "rss_bytes": 24621056
+      },
+      "elapsed_seconds": 0.19,
+      "accepted": 72,
+      "rejected": 0
+    },
+    {
+      "scenario": "burst",
+      "repetition": 1,
+      "before": {
+        "at": "2026-10-19T16:49:33.383258+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 2.37,
+        "rss_bytes": 24641536
+      },
+      "after": {
+        "at": "2026-10-19T16:49:34.829803+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 2.67,
+        "rss_bytes": 24408064
+      },
+      "elapsed_seconds": 1.419,
+      "accepted": 72,
+      "rejected": 0
+    },
+    {
+      "scenario": "burst",
+      "repetition": 2,
+      "before": {
+        "at": "2026-10-19T16:49:34.968989+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 2.68,
+        "rss_bytes": 24420352
+      },
+      "after": {
+        "at": "2026-10-19T16:49:36.435424+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 3.03,
+        "rss_bytes": 24825856
+      },
+      "elapsed_seconds": 1.46,
+      "accepted": 72,
+      "rejected": 0
+    },
+    {
+      "scenario": "burst",
+      "repetition": 3,
+      "before": {
+        "at": "2026-10-19T16:49:36.619067+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 3.07,
+        "rss_bytes": 24838144
+      },
+      "after": {
+        "at": "2026-10-19T16:49:38.111288+00:00",
+        "toolane_goroutines": 16,
+        "toolane_running": 0,
+        "toolane_queued": 0,
+        "toolane_pending": 0,
+        "cpu_seconds": 3.46,
+        "rss_bytes": 25268224
+      },
+      "elapsed_seconds": 1.465,
+      "accepted": 72,
+      "rejected": 0
+    }
+  ],
+  "service_binary_sha256": "ffc43107cc83aba92010d29600f9e94e2100275fd6f298d05e02abe5c996e402",
+  "service_config": {
+    "tool": "mock.delay",
+    "tenants": 3,
+    "workers": 4,
+    "global_pending_limit": 256,
+    "tenant_pending_limit": 64,
+    "tenant_running_limit": 2,
+    "state_dir": "fresh temporary directory"
+  }
+}

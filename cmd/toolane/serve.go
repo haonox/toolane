@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -278,7 +279,7 @@ func runServerWithLogger(ctx context.Context, configPath string, logger *slog.Lo
 		metricsMux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
 			stats := manager.Stats()
 			gauges := observability.Gauges{Queued: stats.Queued, Blocked: stats.Blocked, Pending: stats.Pending, Running: stats.Running,
-				Stored: stats.Stored, ReservedCPUMilli: stats.ReservedSandboxCPUMilli,
+				Stored: stats.Stored, Goroutines: runtime.NumGoroutine(), ReservedCPUMilli: stats.ReservedSandboxCPUMilli,
 				ReservedMemoryBytes: stats.ReservedSandboxMemoryBytes, Halted: stats.Halted}
 			if dockerBackend != nil {
 				gauges.Residual, gauges.ResidualBlocked, _ = dockerBackend.RecoveryStatus()

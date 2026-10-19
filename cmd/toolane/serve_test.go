@@ -247,6 +247,7 @@ func TestRunServerStartsAndStopsLocalDurableAPI(t *testing.T) {
 	metricsBody, metricsErr := io.ReadAll(metricsResponse.Body)
 	_ = metricsResponse.Body.Close()
 	if metricsErr != nil || metricsResponse.StatusCode != http.StatusOK ||
+		!strings.Contains(string(metricsBody), "toolane_goroutines ") ||
 		!strings.Contains(string(metricsBody), `toolane_admissions_total{kind="execution",result="accepted"} 1`) ||
 		!strings.Contains(string(metricsBody), `toolane_admissions_total{kind="execution",result="invalid"} 1`) ||
 		!strings.Contains(string(metricsBody), `toolane_executions_completed_total{status="succeeded"} 1`) {
