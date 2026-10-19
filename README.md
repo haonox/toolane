@@ -1,89 +1,123 @@
 # Toolane
 
-**面向 Agent 的通用工具调度与隔离执行引擎，使用 Go 开发。**
+**面向 Agent 工具调用的单机调度与受限执行服务。** Toolane 接收任务，管理队列、租户配额与 DAG 依赖，通过统一的 Executor 运行工具，并提供持久化的 HTTP 接口。它负责可靠执行；调用方负责决定使用什么工具。
 
-Toolane 负责接收工具任务、限制并发、组织显式依赖、管理执行状态，并通过可替换的 Executor 执行任务。Agent 或调用方负责决定调用什么工具及其参数。
+Go 1.27.1 · SQLite · HTTP + SSE · 可选 Docker 沙箱 · [Apache-2.0](LICENSE)
 
-项目名由 Tool 与 Lane 组合。GitHub 仓库名称：`toolane`。
+## 特性
 
-> V0.1 的单机闭环已可运行，Linux 自动化验收覆盖 ACC-01～07。V0.2 的 DAG、进程内模拟租户配额、轮询调度与 FIFO 对比实验已实现，ACC-08～10 自动化验收通过。
+- **有界调度**：固定 Worker、全局和租户容量限制、租户轮询调度、排队超时与取消。
+- **工作流**：原子提交静态 DAG；失败节点的下游跳过，独立分支继续执行。
+- **三种执行后端**：Mock 用于开发和测试；Process 仅运行服务端注册的可信程序；Docker 使用固定镜像运行受限 Shell 脚本。
+- **持久化与恢复**：SQLite 保存任务、事件和幂等键；重启后续调未认领任务，已认领任务中断并协调其资源。
+- **本地服务接口**：Token 映射租户与工具权限，提供提交、查询、取消、SSE 事件、健康检查和可选管理指标。
 
-V0.3 已接入沙箱 CPU/内存的调度预留、固定镜像的 Docker Shell Executor 和按实例归属的有界残留回收。ACC-11～12 的自动化验收已在合并后的 `main` 上通过，记录见 [V0.3 验收](./docs/V0.3-ACCEPTANCE.md)。
-
-V1.0 的第一批增加了 [SQLite 存储基础](./docs/V1.0-SQLITE-FOUNDATION.md)：独占状态目录、版本化 schema，以及任务状态和事件的事务写入。该批先建立存储边界，单任务运行路径由第三批接入。
-
-第二批增加了 [存储层幂等准入](./docs/V1.0-IDEMPOTENCY.md)：同一租户、提交端点和键的并发重复提交只创建一条任务记录；请求不同则冲突，24 小时后可重用键。其单任务 Manager 接入见第三批；HTTP 接口尚未实现。
-
-第三批增加了 [单任务持久化运行路径](./docs/V1.0-DURABLE-SINGLE.md)：`NewDurableManager` 在准入、认领和状态变化时写入 SQLite，重启前先确认资源回收，再续调未认领任务并中断旧的已认领任务。该模式现可通过 Go API 使用；CLI 演示仍使用内存模式。
-
-第四批补充 [Docker 资源归属持久化](./docs/V1.0-DOCKER-OWNERSHIP.md)：容器创建后、启动前先记录容器 ID 与部署实例 ID；重启恢复回调收到这些记录，同时仍需扫描归属标签来覆盖 ID 尚未落盘的崩溃窗口。真实 Docker 恢复测试需在可访问 Docker daemon 的环境运行。
-
-第五批增加 [Workflow 存储基础](./docs/V1.0-WORKFLOW-STORE.md)：一次事务写入 Workflow、节点关系、各节点 Execution 和首个事件，并可在重启后按提交顺序读取。
-
-第六批接入 [持久化 Workflow 运行与恢复](./docs/V1.0-DURABLE-WORKFLOW.md)：`NewDurableManager` 可执行静态 DAG；节点状态、事件及工作流汇总状态落盘。重启时重建依赖，继续未认领节点，已认领节点标记为 `interrupted`，独立分支继续执行。
-
-第七批增加 [Workflow 幂等提交](./docs/V1.0-WORKFLOW-IDEMPOTENCY.md)：`SubmitWorkflowIdempotent` 将整批 DAG 与幂等键在一个事务中提交；有效键的等价请求在容量已满或服务重启后仍返回原工作流。
-
-第八批增加 [持久化记录保留与容量控制](./docs/V1.0-DURABLE-RETENTION.md)：默认保留终态记录和事件 7 天、最多保存 10000 条 Execution；清理保护活动任务、待清理资源与有效幂等键，Workflow 按整批删除。容量被保护记录占满时拒绝新提交。
-
-第九批增加 [本地 HTTP API](./docs/V1.0-HTTP-API.md)：`toolane serve` 使用私有配置文件中的 Token 确定租户和允许工具，提供单任务及 Workflow 的提交、查询、取消接口与健康检查。
-
-第十批增加 [执行事件 SSE](./docs/V1.0-SSE.md)：按任务回放 SQLite 事件并订阅新事件，支持 `Last-Event-ID`、租户隔离、连接上限和慢客户端写入期限；输出按有限大小分块记录，终态以 `end` 事件通知。
-
-第十一批接入 [Docker HTTP 服务](./docs/V1.0-DOCKER-HTTP.md)：配置固定镜像和稳定实例 ID 后，可通过 Token 调用 `sandbox.shell`。服务先回收本实例容器、核对持久化资源并检查 Docker 隔离条件，再开放 HTTP 准入；状态目录固定实例 ID，防止重启时漏扫旧实例。
-
-第十二批增加 [本地管理指标](./docs/V1.0-METRICS.md)：可选的独立回环地址管理端口提供有界标签的 Prometheus 文本指标，覆盖 HTTP 准入、任务终态、排队与执行耗时、清理失败及当前运行和残留资源。业务端口不开放指标路径。
-
-第十三批补齐 [恢复后的容器清理状态](./docs/V1.0-RECOVERY-CLEANUP.md)：服务只在确认持久化容器 ID 不存在后，将历史任务的 `cleanup_status` 更新为成功；仍在等待后台删除的容器持续核对，保留策略继续保护未确认的记录。
-
-第十四批增加 [结构化日志](./docs/V1.0-STRUCTURED-LOGS.md)：本地服务向标准错误输出写入 JSON 请求、执行状态与恢复日志，以受控字段关联 request、Execution、Workflow 和 Tenant ID；不记录 Token、参数或工具输出。
-
-第十五批增加 [Python 调用示例](./docs/V1.0-PYTHON-EXAMPLE.md)：标准库脚本通过本地 HTTP API 提交、查询和取消 Mock 任务，演示 Token、幂等键及终态处理。
-
-第十六批增加 [本地 HTTP 服务负载实验](./docs/V1.0-HTTP-EXPERIMENT.md)：使用临时服务和三租户 Mock 工作负载记录四类场景的准入、终态、延迟及资源快照，原始数据和复现命令随仓库保存。
-
-V1.0 的 [最终验收记录](./docs/V1.0-ACCEPTANCE.md)汇总 ACC-13～17、真实服务进程崩溃恢复、Docker 集成测试和负载实验的证据与边界。
-
-## 项目目标
-
-- **调度**：有界队列、并发配额、DAG 依赖与租户公平调度。
-- **执行**：统一 Executor，支持 Mock、可信本地进程与 Docker 沙箱。
-- **可靠性**：明确的状态机、超时取消、输出限制、资源回收与重启协调。
-- **服务接口**：HTTP 提交、查询、取消与 SSE 事件，适配不同语言的 Agent。
-- **工程验证**：并发测试、隔离与故障测试、可复现的性能实验。
-
-## 开发路线
-
-| 阶段 | 重点 |
-| --- | --- |
-| V0.1 | 单机执行闭环：Mock/Process、Worker、状态、超时与取消 |
-| V0.2 | DAG、租户配额、公平调度与基线对比 |
-| V0.3 | Docker 沙箱、资源与权限限制、清理与隔离验证 |
-| V1.0 | HTTP、SQLite、幂等提交、重启协调、SSE 与可观测性 |
-
-默认从 **V0.1 / M0.1** 开始：先完成工具注册、Mock Executor、有界队列、Worker、状态查询、取消、超时与 CLI 演示，再接入可信 Process Executor。
-
-## 当前可运行内容
-
-需要 Go 1.27.1。运行本地 Mock 或可信进程演示：
-
-```bash
-go run ./cmd/toolane
-go run ./cmd/toolane process
-go run ./cmd/toolane serve --config /absolute/path/server.json
+```mermaid
+flowchart LR
+    Client[Agent / Client] --> API[HTTP API]
+    API --> Manager[Scheduler & Manager]
+    Manager <--> Store[(SQLite)]
+    Manager --> Executor{Executor}
+    Executor --> Mock[Mock]
+    Executor --> Process[Trusted Process]
+    Executor --> Docker[Docker Sandbox]
 ```
 
-当前可在 Go 进程内注册工具并调用 `Submit`、`Get`、`Cancel` 和 `Close`。Manager 使用固定 Worker、有界待启动容量、默认按租户轮询的就绪调度与一个排队期限监视器；运行取消或超时后，等待 Executor 返回才释放槽位。默认限制为 4 个 Worker、256 个全局待启动任务、每租户 2 个运行槽位和 64 个待启动节点、30 秒排队期限、10 秒执行期限、256 KiB 参数、64 KiB 结构化结果、stdout/stderr 共享 1 MiB 原始字节预算、256 字节 Agent ID、4 KiB 错误摘要，以及保留 1000 个终态记录。请求可在配置上限内收紧期限和输出预算。
+## 快速开始
 
-进程内调用方现在也可以使用 `SubmitWorkflow`、`GetWorkflow` 和 `CancelWorkflow` 提交、查询和取消静态 DAG。工作流默认最多 64 个节点、请求编码最多 256 KiB。整批校验并接受；等待依赖的 `blocked` 节点与 `queued` 节点共同占用待启动容量，等待期限均从接受时起算。节点失败会跳过受影响的下游，独立分支继续执行。完成的工作流和全部节点作为一组淘汰，活动工作流的已完成节点保持可查询。接口与限制见 [V0.2 DAG 说明](./docs/V0.2-DAG.md)。
+需要 **Go 1.27.1**。克隆仓库后，可以先运行不依赖 Docker 的演示：
 
-注册工具时可在 `tool.Definition.Policy` 中设置更严格的排队与执行期限、输出预算、参数大小和结果大小。策略字段为零时沿用 Manager 的全局配置；若工具最大值低于全局默认值，未指定的工具默认值会收紧到该最大值。超出全局上限的工具策略会在 Manager 启动前被拒绝；任务记录保存实际采用的期限与预算。
+```bash
+git clone https://github.com/haonox/toolane.git
+cd toolane
+go run ./cmd/toolane          # Mock 任务
+go run ./cmd/toolane process  # 可信本地进程任务，仅 Linux
+```
 
-Process Executor 只运行服务端显式注册且标为可信的绝对路径程序，用参数数组启动，不调用 Shell。Linux 下为进程建立独立进程组；取消、超时或输出达到上限时先发送 SIGTERM，宽限期后发送 SIGKILL，并限制等待继承管道的时间。若进程组停止无法确认，Manager 保留运行预留、暂停新任务准入并报告关闭错误。这个机制仅适用于可信程序，不是安全沙箱。CLI 的 `process` 演示运行系统 `printf`；没有任意命令执行入口。
+### 启动 HTTP 服务
 
-Docker Executor 可通过进程内工具注册或 `toolane serve` 的固定配置使用；管理员必须指定已在本地存在的镜像标签、SHA-256 digest 和部署实例 ID。它在启动前检查 Docker cgroup v2、seccomp 和实际容器配置；任务只能提交 Shell 脚本，不能指定镜像、网络、挂载或权限。容器默认无网络，以非 root 运行，使用只读根目录和有大小限制的 tmpfs 工作区。用法与策略见 [V0.3 Docker Executor 说明](./docs/V0.3-DOCKER-EXECUTOR.md)，服务配置见 [Docker HTTP 服务](./docs/V1.0-DOCKER-HTTP.md)。CLI 演示命令尚未提供 Docker 入口。
+创建一个仅自己可读的配置文件，例如 `/absolute/private/server.json`。将 Token 替换为私密随机值（可用 `openssl rand -hex 32` 生成），并将状态目录改为本机绝对路径：
 
-运行检查：
+```json
+{
+  "listen": "127.0.0.1:8080",
+  "state_dir": "/absolute/private/toolane-state",
+  "tokens": [
+    {
+      "token": "replace-with-a-private-random-token",
+      "tenant_id": "local",
+      "tools": ["mock.delay"]
+    }
+  ]
+}
+```
+
+```bash
+chmod 600 /absolute/private/server.json
+go run ./cmd/toolane serve --config /absolute/private/server.json
+```
+
+服务只接受回环地址；状态目录会以私有权限创建，已有目录也必须仅所有者可访问。`/readyz` 在存储及资源恢复完成后才返回就绪。可在配置中加入 `"metrics_listen": "127.0.0.1:9090"`，从独立的本地端口读取 `GET /metrics`。
+
+提交一个 Mock 任务，将下方 Token 替换为配置中的值：
+
+```bash
+curl -sS http://127.0.0.1:8080/api/v1/executions \
+  -H 'Authorization: Bearer replace-with-a-private-random-token' \
+  -H 'Content-Type: application/json' \
+  -d '{"tool":"mock.delay","arguments":{"delay_ms":100,"value":"hello"}}'
+```
+
+响应中的 `execution_id` 可用于查询状态或订阅事件。仓库也提供只依赖 Python 标准库的[客户端示例](examples/python_client.py)：
+
+```bash
+TOOLANE_TOKEN='replace-with-a-private-random-token' \
+  python3 examples/python_client.py run --delay-ms 100 --value hello
+```
+
+## HTTP API
+
+业务接口使用 `Authorization: Bearer <token>`；租户身份和可调用工具由服务配置决定。
+
+| 方法 | 路径 | 作用 |
+| --- | --- | --- |
+| `POST` | `/api/v1/executions` | 提交任务，支持 `Idempotency-Key` |
+| `GET` | `/api/v1/executions/{id}` | 查询任务 |
+| `POST` | `/api/v1/executions/{id}/cancel` | 取消任务 |
+| `GET` | `/api/v1/executions/{id}/events` | 订阅或回放 SSE 事件 |
+| `POST` | `/api/v1/workflows` | 提交 DAG，支持 `Idempotency-Key` |
+| `GET` | `/api/v1/workflows/{id}` | 查询工作流 |
+| `POST` | `/api/v1/workflows/{id}/cancel` | 取消工作流 |
+| `GET` | `/healthz`、`/readyz` | 存活与就绪检查 |
+
+跨租户记录不会通过查询、取消或事件接口暴露。服务向标准错误输出结构化 JSON 日志；管理指标使用独立的回环地址端口。
+
+## Docker 执行
+
+Docker 后端仅用于 Linux。服务管理员须先在本机准备镜像，并在配置中固定**镜像标签、SHA-256 digest 和稳定的实例 ID**。以下是可独立使用的 Docker 服务配置，测试镜像为 Alpine 3.24.2：
+
+```json
+{
+  "listen": "127.0.0.1:8080",
+  "state_dir": "/absolute/private/toolane-state",
+  "docker": {
+    "image_tag": "alpine:3.24.2",
+    "image_digest": "sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6",
+    "instance_id": "local"
+  },
+  "tokens": [
+    {
+      "token": "replace-with-a-private-random-token",
+      "tenant_id": "local",
+      "tools": ["sandbox.shell"]
+    }
+  ]
+}
+```
+
+与前面的 HTTP 配置相同，先生成私密 Token，将配置写入仅自己可读的文件，再用 `serve --config` 启动。服务启动时先回收本实例的残留容器并检查 Docker 隔离条件。容器默认无网络，以非 root 身份运行，使用只读根目录、有界工作区及 CPU/内存限制。请求不能选择镜像、挂载、网络或特权参数。运行服务的用户需要有访问 Docker daemon 的权限。
+
+## 开发与验证
 
 ```bash
 go test ./...
@@ -91,46 +125,34 @@ go test -race ./...
 go vet ./...
 ```
 
-演示提供 `mock.delay` 与 `process.printf`；调用方也可在服务端注册其他可信工具或 Docker Shell 工具。V0.2 的租户 ID 只由可信进程内调用方提供，不构成身份认证；可配置 `SchedulerFIFO` 作为实验基线。CLI 演示使用的 `NewManager` 仍只保留内存状态；`toolane serve` 使用 SQLite 和 Token 身份映射，按配置开放 Mock 与 Docker Shell 工具的本地 HTTP API。Docker 仅面向 Linux 主机；服务启动时按实例标签回收残留容器，删除失败会有界重试。Process Executor 与真实进程测试也以 Linux 为目标；其他平台会返回 `process_unsupported`。
+真实 Docker 集成测试需要本地 daemon 权限和已拉取的固定镜像：
 
-## 项目边界
+```bash
+go test -tags=integration ./cmd/toolane ./tests/integration/... -count=1
+```
 
-本项目不处理 LLM 推理或 Agent Planning。初期采用单机部署，不引入分布式消息队列、Kubernetes 或复杂 Web 平台。
+如果 Docker 仅允许通过 `sudo` 访问，请先以普通用户运行 `go mod download`，再复用该用户的模块缓存：
 
-Process Executor 只运行可信工具；Docker 版本针对常见资源滥用与权限越界提供受限执行，不承诺抵御所有恶意代码与内核漏洞。默认不自动重试，避免未知结果导致重复副作用。
+```bash
+sudo env PATH="$PATH" GOCACHE=/tmp/toolane-go-cache \
+  GOMODCACHE="$(go env GOMODCACHE)" GOPROXY=off \
+  go test -tags=integration ./cmd/toolane ./tests/integration/... -count=1
+```
 
-## 开发文档
+`benchmarks/` 包含调度基准与本地 HTTP 负载脚本；对应原始结果保存在 [`benchmarks/results/`](benchmarks/results/) 中。它们分别测量 Mock 路径，不能当作真实容器吞吐数据。
 
-| 文档 | 用途 |
+| 路径 | 内容 |
 | --- | --- |
-| [REQUIREMENTS.md](./REQUIREMENTS.md) | 项目范围、版本计划、执行语义、默认限额与验收条件 |
-| [DEVELOPMENT.md](./DEVELOPMENT.md) | Go 风格、模块边界、测试要求与 AI 协作流程 |
-| [docs/V0.1-ACCEPTANCE.md](./docs/V0.1-ACCEPTANCE.md) | V0.1 自动化验收范围、命令与限制 |
-| [doc/V0.1-TECHNICAL-REPORT.md](./doc/V0.1-TECHNICAL-REPORT.md) | 当前实现的架构、执行语义、代码审查路线与已知边界 |
-| [docs/V0.2-DAG.md](./docs/V0.2-DAG.md) | V0.2 第一批 DAG 接口、状态与验证范围 |
-| [docs/V0.2-SCHEDULER.md](./docs/V0.2-SCHEDULER.md) | 租户配额、轮询调度、测试与 FIFO 对比实验 |
-| [docs/V0.2-ACCEPTANCE.md](./docs/V0.2-ACCEPTANCE.md) | V0.2 阶段验收命令、证据与边界 |
-| [docs/V0.3-RESOURCE-BUDGET.md](./docs/V0.3-RESOURCE-BUDGET.md) | V0.3 第一批的沙箱资源准入语义与验证范围 |
-| [docs/V0.3-DOCKER-EXECUTOR.md](./docs/V0.3-DOCKER-EXECUTOR.md) | V0.3 Docker Executor 策略、进程内接入、真实容器测试与限制 |
-| [docs/V0.3-RECOVERY.md](./docs/V0.3-RECOVERY.md) | V0.3 残留回收、故障隔离与启动顺序 |
-| [docs/V0.3-ACCEPTANCE.md](./docs/V0.3-ACCEPTANCE.md) | V0.3 阶段验收证据与边界 |
-| [docs/V1.0-SQLITE-FOUNDATION.md](./docs/V1.0-SQLITE-FOUNDATION.md) | SQLite 驱动选择、Schema v1、事务边界与测试 |
-| [docs/V1.0-IDEMPOTENCY.md](./docs/V1.0-IDEMPOTENCY.md) | Schema v2、事务化幂等准入及验证范围 |
-| [docs/V1.0-DURABLE-SINGLE.md](./docs/V1.0-DURABLE-SINGLE.md) | 单任务持久化 Manager 的启动、准入、认领与重启语义 |
-| [docs/V1.0-DOCKER-OWNERSHIP.md](./docs/V1.0-DOCKER-OWNERSHIP.md) | Docker 容器 ID 落盘顺序、标签兜底与恢复测试 |
-| [docs/V1.0-WORKFLOW-STORE.md](./docs/V1.0-WORKFLOW-STORE.md) | Schema v3、Workflow 整批事务准入与重启读取 |
-| [docs/V1.0-DURABLE-WORKFLOW.md](./docs/V1.0-DURABLE-WORKFLOW.md) | 持久化 DAG 的调度、取消与重启恢复语义 |
-| [docs/V1.0-WORKFLOW-IDEMPOTENCY.md](./docs/V1.0-WORKFLOW-IDEMPOTENCY.md) | Schema v4、Workflow 幂等键的作用域、规范化与事务准入 |
-| [docs/V1.0-DURABLE-RETENTION.md](./docs/V1.0-DURABLE-RETENTION.md) | 持久化期限和容量清理、保护规则与验证 |
-| [docs/V1.0-HTTP-API.md](./docs/V1.0-HTTP-API.md) | 本地服务配置、Token 租户身份与已实现的 HTTP 接口 |
-| [docs/V1.0-DOCKER-HTTP.md](./docs/V1.0-DOCKER-HTTP.md) | Docker HTTP 服务配置、启动恢复、请求示例与真实容器验证 |
-| [docs/V1.0-METRICS.md](./docs/V1.0-METRICS.md) | 独立管理端口、指标语义与安全边界 |
-| [docs/V1.0-RECOVERY-CLEANUP.md](./docs/V1.0-RECOVERY-CLEANUP.md) | 重启回收后清理状态协调与持久化验证 |
-| [docs/V1.0-STRUCTURED-LOGS.md](./docs/V1.0-STRUCTURED-LOGS.md) | 服务 JSON 日志字段、隐私边界与日志丢弃策略 |
-| [docs/V1.0-PYTHON-EXAMPLE.md](./docs/V1.0-PYTHON-EXAMPLE.md) | Python 标准库调用示例与本地运行方法 |
-| [docs/V1.0-HTTP-EXPERIMENT.md](./docs/V1.0-HTTP-EXPERIMENT.md) | Mock HTTP 服务负载实验的方法、数据与适用范围 |
-| [docs/V1.0-ACCEPTANCE.md](./docs/V1.0-ACCEPTANCE.md) | V1.0 验收矩阵、命令、真实 Docker 结果及结果边界 |
+| `cmd/toolane/` | CLI 演示与本地 HTTP 服务 |
+| `internal/execution/` | 状态机、调度、工作流和恢复 |
+| `internal/executor/` | Mock、可信 Process 与 Docker 后端 |
+| `internal/httpapi/`、`internal/store/sqlite/` | HTTP/SSE 接口与持久化 |
+| `examples/`、`benchmarks/`、`tests/integration/` | 调用示例、实验与真实容器测试 |
 
-**协作 AI 开始工作前须读取上述两份文档与本 README。** 未指定阶段时只开发 V0.1；不要提前实现整条路线。
+欢迎通过 Issue 描述问题或提议改进；提交代码时请附上与改动相关的测试结果。
 
-README 会随实际代码更新运行命令、已实现能力和验证结果。目前不提供性能数字或上线声明。
+## 边界与许可证
+
+Toolane 是单机项目，不提供 LLM 推理、Agent 规划、多实例共享数据库或自动重试。Process 后端只适合可信程序；Docker 后端降低常见越权与资源滥用风险，不承诺抵御宿主内核漏洞。服务默认只监听本机；对外暴露时须自行配置受信任的 TLS 入口。
+
+本项目采用 [Apache License 2.0](LICENSE)。
