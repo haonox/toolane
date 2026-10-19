@@ -54,14 +54,22 @@ type normalizedRequest struct {
 // workers. recoverResources receives persisted references and must confirm
 // they are stopped or absent, while also scanning ownership labels for the
 // create-before-record crash window. A failure prevents admission. The caller
-// owns store and closes it after Manager.Close.
-func NewDurableManager(ctx context.Context, config Config, registry *tool.Registry, store *sqlite.Store, recoverResources func(context.Context, []RecoveryResource) error) (*Manager, error) {
+// owns store and closes it after Manager.Close. An optional observer runs
+// synchronously under the Manager lock after each committed transition; it
+// must stay fast and must not call back into Manager.
+func NewDurableManager(ctx context.Context, config Config, registry *tool.Registry, store *sqlite.Store, recoverResources func(context.Context, []RecoveryResource) error, observers ...func(Snapshot, Snapshot)) (*Manager, error) {
 	if store == nil || recoverResources == nil {
 		return nil, errors.New("durable manager requires a store and resource recovery")
+	}
+	if len(observers) > 1 {
+		return nil, errors.New("at most one transition observer is allowed")
 	}
 	m, err := newManager(config, registry, store)
 	if err != nil {
 		return nil, err
+	}
+	if len(observers) == 1 {
+		m.transitionObserver = observers[0]
 	}
 	release, err := store.ClaimRuntime()
 	if err != nil {
@@ -434,7 +442,11 @@ func (m *Manager) applySnapshotKindLocked(r *record, next Snapshot, kind string)
 		r.outputEvents = nil
 		m.notifyEventsLocked(next.ID)
 	}
+	before := r.snapshot
 	r.snapshot = next
+	if m.transitionObserver != nil {
+		m.transitionObserver(before, next)
+	}
 	return nil
 }
 

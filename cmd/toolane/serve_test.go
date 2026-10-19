@@ -34,6 +34,7 @@ func TestLoadServerConfigRequiresPrivateLoopbackConfiguration(t *testing.T) {
 	}
 	for _, raw := range []string{
 		strings.Replace(valid, "127.0.0.1:0", "0.0.0.0:8080", 1),
+		strings.Replace(valid, `"tokens":`, `"metrics_listen":"0.0.0.0:9090","tokens":`, 1),
 		strings.Replace(valid, "mock.delay", "process.printf", 1),
 		strings.Replace(valid, `"tokens":`, `"sse_tenant_limit":9,"sse_global_limit":8,"tokens":`, 1),
 		valid + `{}`,
@@ -155,9 +156,15 @@ func TestRunServerStartsAndStopsLocalDurableAPI(t *testing.T) {
 	}
 	address := listener.Addr().String()
 	_ = listener.Close()
+	managementListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	managementAddress := managementListener.Addr().String()
+	_ = managementListener.Close()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "server.json")
-	raw, err := json.Marshal(serverConfig{Listen: address, StateDir: filepath.Join(dir, "state"),
+	raw, err := json.Marshal(serverConfig{Listen: address, MetricsListen: managementAddress, StateDir: filepath.Join(dir, "state"),
 		Tokens: []httpapi.Token{{Value: "local-test-secret-123456", TenantID: "local", Tools: []string{"mock.delay"}}}})
 	if err != nil {
 		t.Fatal(err)
@@ -203,6 +210,19 @@ func TestRunServerStartsAndStopsLocalDurableAPI(t *testing.T) {
 	if response.StatusCode != http.StatusAccepted || decodeErr != nil || accepted.ExecutionID == "" {
 		t.Fatalf("HTTP submission status=%d id=%q err=%v", response.StatusCode, accepted.ExecutionID, decodeErr)
 	}
+	invalid, err := http.NewRequest(http.MethodPost, base+"/api/v1/executions", strings.NewReader(`{"tool":`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalid.Header.Set("Authorization", "Bearer local-test-secret-123456")
+	invalidResponse, err := client.Do(invalid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = invalidResponse.Body.Close()
+	if invalidResponse.StatusCode != http.StatusBadRequest {
+		t.Fatalf("malformed admission status=%d", invalidResponse.StatusCode)
+	}
 	eventsRequest, err := http.NewRequest(http.MethodGet, base+"/api/v1/executions/"+accepted.ExecutionID+"/events", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -216,6 +236,34 @@ func TestRunServerStartsAndStopsLocalDurableAPI(t *testing.T) {
 	_ = eventsResponse.Body.Close()
 	if eventsResponse.StatusCode != http.StatusOK || readErr != nil || !strings.Contains(string(events), "event: end\n") {
 		t.Fatalf("HTTP event stream status=%d body=%q err=%v", eventsResponse.StatusCode, events, readErr)
+	}
+	metricsResponse, err := client.Get("http://" + managementAddress + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metricsBody, metricsErr := io.ReadAll(metricsResponse.Body)
+	_ = metricsResponse.Body.Close()
+	if metricsErr != nil || metricsResponse.StatusCode != http.StatusOK ||
+		!strings.Contains(string(metricsBody), `toolane_admissions_total{kind="execution",result="accepted"} 1`) ||
+		!strings.Contains(string(metricsBody), `toolane_admissions_total{kind="execution",result="invalid"} 1`) ||
+		!strings.Contains(string(metricsBody), `toolane_executions_completed_total{status="succeeded"} 1`) {
+		t.Fatalf("management metrics status=%d body=%q err=%v", metricsResponse.StatusCode, metricsBody, metricsErr)
+	}
+	businessMetrics, err := client.Get(base + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = businessMetrics.Body.Close()
+	if businessMetrics.StatusCode != http.StatusNotFound {
+		t.Fatalf("business listener exposed metrics: %d", businessMetrics.StatusCode)
+	}
+	managementAPI, err := client.Get("http://" + managementAddress + "/api/v1/executions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = managementAPI.Body.Close()
+	if managementAPI.StatusCode != http.StatusNotFound {
+		t.Fatalf("management listener exposed business API: %d", managementAPI.StatusCode)
 	}
 	cancel()
 	select {

@@ -76,8 +76,16 @@ func TestDockerHTTPServiceRecoversAndRunsSandbox(t *testing.T) {
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
+	managementListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	managementAddress := managementListener.Addr().String()
+	if err := managementListener.Close(); err != nil {
+		t.Fatal(err)
+	}
 	configPath := filepath.Join(dir, "server.json")
-	config := serverConfig{Listen: address, StateDir: stateDir,
+	config := serverConfig{Listen: address, MetricsListen: managementAddress, StateDir: stateDir,
 		Tokens: []httpapi.Token{
 			{Value: "docker-http-local-token-12345", TenantID: "local", Tools: []string{sandboxToolName}},
 			{Value: "docker-http-other-token-12345", TenantID: "other", Tools: []string{sandboxToolName}},
@@ -178,6 +186,17 @@ func TestDockerHTTPServiceRecoversAndRunsSandbox(t *testing.T) {
 	finished := getServiceExecution(t, client, base, accepted.ExecutionID, "docker-http-local-token-12345")
 	if finished.State != execution.Succeeded || finished.CleanupStatus != "succeeded" || !strings.Contains(finished.Stdout, "uid=65532") || !strings.Contains(finished.Stdout, "hello") {
 		t.Fatalf("sandbox result: %+v", finished)
+	}
+	metricsResponse, err := client.Get("http://" + managementAddress + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metricsBody, metricsErr := io.ReadAll(metricsResponse.Body)
+	_ = metricsResponse.Body.Close()
+	if metricsErr != nil || metricsResponse.StatusCode != http.StatusOK ||
+		!strings.Contains(string(metricsBody), `toolane_executions_completed_total{status="succeeded"} 1`) ||
+		!strings.Contains(string(metricsBody), "toolane_residual_containers 0") {
+		t.Fatalf("Docker management metrics status=%d body=%q err=%v", metricsResponse.StatusCode, metricsBody, metricsErr)
 	}
 	remaining, err := exec.Command(dockerBinary, "container", "ls", "--all", "--quiet", "--filter=label=toolane.instance="+instance).Output()
 	if err != nil || strings.TrimSpace(string(remaining)) != "" {

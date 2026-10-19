@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/haonox/toolane/internal/execution"
+	"github.com/haonox/toolane/internal/observability"
 	"github.com/haonox/toolane/internal/store/sqlite"
 )
 
@@ -41,6 +42,7 @@ type requestIDKey struct{}
 // API owns only HTTP transport state; callers own and close the Manager.
 type API struct {
 	manager    *execution.Manager
+	metrics    *observability.Recorder
 	tokens     map[[32]byte]principal
 	mux        *http.ServeMux
 	sseOptions SSEOptions
@@ -84,11 +86,11 @@ func New(manager *execution.Manager, tokens []Token, options ...SSEOptions) (*AP
 	}
 	a.mux.HandleFunc("GET /healthz", a.health)
 	a.mux.HandleFunc("GET /readyz", a.ready)
-	a.mux.HandleFunc("POST /api/v1/executions", a.withPrincipal(a.submitExecution))
+	a.mux.HandleFunc("POST /api/v1/executions", a.observeAdmission("execution", a.withPrincipal(a.submitExecution)))
 	a.mux.HandleFunc("GET /api/v1/executions/{id}", a.withPrincipal(a.getExecution))
 	a.mux.HandleFunc("GET /api/v1/executions/{id}/events", a.withPrincipal(a.streamExecution))
 	a.mux.HandleFunc("POST /api/v1/executions/{id}/cancel", a.withPrincipal(a.cancelExecution))
-	a.mux.HandleFunc("POST /api/v1/workflows", a.withPrincipal(a.submitWorkflow))
+	a.mux.HandleFunc("POST /api/v1/workflows", a.observeAdmission("workflow", a.withPrincipal(a.submitWorkflow)))
 	a.mux.HandleFunc("GET /api/v1/workflows/{id}", a.withPrincipal(a.getWorkflow))
 	a.mux.HandleFunc("POST /api/v1/workflows/{id}/cancel", a.withPrincipal(a.cancelWorkflow))
 	for pattern, allowed := range map[string]string{
@@ -108,6 +110,46 @@ func New(manager *execution.Manager, tokens []Token, options ...SSEOptions) (*AP
 		writeError(w, r, http.StatusNotFound, "not_found", "route not found")
 	})
 	return a, nil
+}
+
+// EnableMetrics attaches a process-local recorder before ServeHTTP is used.
+func (a *API) EnableMetrics(recorder *observability.Recorder) {
+	a.metrics = recorder
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusWriter) Write(data []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(data)
+}
+
+func (a *API) observeAdmission(kind string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if a.metrics == nil {
+			next(w, r)
+			return
+		}
+		wrapped := &statusWriter{ResponseWriter: w}
+		next(wrapped, r)
+		status := wrapped.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		a.metrics.RecordAdmission(kind, status)
+	}
 }
 
 func printableToken(token string) bool {
