@@ -22,9 +22,11 @@ import (
 )
 
 type serverConfig struct {
-	Listen   string          `json:"listen"`
-	StateDir string          `json:"state_dir"`
-	Tokens   []httpapi.Token `json:"tokens"`
+	Listen         string          `json:"listen"`
+	StateDir       string          `json:"state_dir"`
+	Tokens         []httpapi.Token `json:"tokens"`
+	SSETenantLimit int             `json:"sse_tenant_limit"`
+	SSEGlobalLimit int             `json:"sse_global_limit"`
 }
 
 func loadServerConfig(path string) (serverConfig, error) {
@@ -77,6 +79,16 @@ func loadServerConfig(path string) (serverConfig, error) {
 	if !filepath.IsAbs(config.StateDir) || len(config.Tokens) == 0 {
 		return serverConfig{}, errors.New("absolute state_dir and tokens are required")
 	}
+	defaults := httpapi.DefaultSSEOptions()
+	if config.SSETenantLimit == 0 {
+		config.SSETenantLimit = defaults.TenantLimit
+	}
+	if config.SSEGlobalLimit == 0 {
+		config.SSEGlobalLimit = defaults.GlobalLimit
+	}
+	if config.SSETenantLimit < 1 || config.SSEGlobalLimit < config.SSETenantLimit {
+		return serverConfig{}, errors.New("invalid SSE connection limits")
+	}
 	for _, token := range config.Tokens {
 		for _, name := range token.Tools {
 			if name != mock.Name {
@@ -117,7 +129,9 @@ func runServer(ctx context.Context, configPath string) (retErr error) {
 		defer cancel()
 		retErr = errors.Join(retErr, manager.Close(closeCtx))
 	}()
-	api, err := httpapi.New(manager, config.Tokens)
+	sseOptions := httpapi.DefaultSSEOptions()
+	sseOptions.TenantLimit, sseOptions.GlobalLimit = config.SSETenantLimit, config.SSEGlobalLimit
+	api, err := httpapi.New(manager, config.Tokens, sseOptions)
 	if err != nil {
 		return err
 	}
@@ -125,7 +139,7 @@ func runServer(ctx context.Context, configPath string) (retErr error) {
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Handler: api, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second,
+	server := &http.Server{Handler: api, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		IdleTimeout: 60 * time.Second, MaxHeaderBytes: 8 * 1024}
 	served := make(chan error, 1)
 	go func() { served <- server.Serve(listener) }()

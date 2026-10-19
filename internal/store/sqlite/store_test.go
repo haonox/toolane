@@ -107,6 +107,52 @@ func TestCreateAndTransitionRollBackWhenEventWriteFails(t *testing.T) {
 	}
 }
 
+func TestOutputEventBatchIsOrderedAndAtomic(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	record, initial := fixture()
+	if err := s.CreateExecution(ctx, record, initial); err != nil {
+		t.Fatal(err)
+	}
+	chunks := []Event{
+		{Kind: "output", Payload: []byte(`{"chunk":"a"}`), OccurredAt: initial.OccurredAt.Add(time.Second)},
+		{Kind: "output", Payload: []byte(`{"chunk":"b"}`), OccurredAt: initial.OccurredAt.Add(2 * time.Second)},
+	}
+	terminal := Event{Kind: "end", Payload: []byte(`{"status":"succeeded"}`), OccurredAt: initial.OccurredAt.Add(3 * time.Second)}
+	version, err := s.TransitionWithEvents(ctx, record.ID, 1, "succeeded", []byte(`{"status":"succeeded"}`), chunks, terminal)
+	if err != nil || version != 2 {
+		t.Fatalf("transition with output: version=%d err=%v", version, err)
+	}
+	first, last, remaining, err := s.EventBounds(ctx, record.ID, 0)
+	if err != nil || first != 1 || last != 4 || remaining != 4 {
+		t.Fatalf("bounds=%d..%d remaining=%d err=%v", first, last, remaining, err)
+	}
+	page, err := s.EventsAfterLimit(ctx, record.ID, 1, 1)
+	if err != nil || len(page) != 1 || page[0].Sequence != 2 || page[0].Kind != "output" {
+		t.Fatalf("bounded replay: %+v err=%v", page, err)
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE TRIGGER reject_output BEFORE INSERT ON execution_events
+		WHEN CAST(NEW.payload AS TEXT) = '{"chunk":"bad"}' BEGIN SELECT RAISE(ABORT, 'test event failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	failed := []Event{chunks[0], {Kind: "output", Payload: []byte(`{"chunk":"bad"}`), OccurredAt: initial.OccurredAt.Add(3 * time.Second)}}
+	if _, err := s.TransitionWithEvents(ctx, record.ID, 2, "failed", []byte(`{"status":"failed"}`), failed, terminal); err == nil {
+		t.Fatal("batch committed despite second event failure")
+	}
+	_, last, _, err = s.EventBounds(ctx, record.ID, 0)
+	if err != nil || last != 4 {
+		t.Fatalf("partial output batch survived: last=%d err=%v", last, err)
+	}
+	got, err := s.GetExecution(ctx, record.ID)
+	if err != nil || got.Version != 2 || got.State != "succeeded" {
+		t.Fatalf("snapshot changed despite failed output: %+v err=%v", got, err)
+	}
+}
+
 func TestRejectNewerSchemaWithoutChangingIt(t *testing.T) {
 	ctx := context.Background()
 	dir := filepath.Join(t.TempDir(), "state")

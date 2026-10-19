@@ -14,6 +14,7 @@ import (
 	"math"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/haonox/toolane/internal/execution"
@@ -39,16 +40,31 @@ type requestIDKey struct{}
 
 // API owns only HTTP transport state; callers own and close the Manager.
 type API struct {
-	manager *execution.Manager
-	tokens  map[[32]byte]principal
-	mux     *http.ServeMux
+	manager    *execution.Manager
+	tokens     map[[32]byte]principal
+	mux        *http.ServeMux
+	sseOptions SSEOptions
+	sseMu      sync.Mutex
+	sseTotal   int
+	sseTenants map[string]int
 }
 
-func New(manager *execution.Manager, tokens []Token) (*API, error) {
+func New(manager *execution.Manager, tokens []Token, options ...SSEOptions) (*API, error) {
 	if manager == nil || len(tokens) == 0 {
 		return nil, errors.New("HTTP API requires a manager and at least one token")
 	}
-	a := &API{manager: manager, tokens: make(map[[32]byte]principal, len(tokens)), mux: http.NewServeMux()}
+	if len(options) > 1 {
+		return nil, errors.New("at most one SSE options value is allowed")
+	}
+	sseOptions := DefaultSSEOptions()
+	if len(options) == 1 {
+		sseOptions = options[0]
+	}
+	if err := sseOptions.validate(); err != nil {
+		return nil, err
+	}
+	a := &API{manager: manager, tokens: make(map[[32]byte]principal, len(tokens)), mux: http.NewServeMux(),
+		sseOptions: sseOptions, sseTenants: make(map[string]int)}
 	for _, token := range tokens {
 		if len(token.Value) < 16 || len(token.Value) > 4096 || !printableToken(token.Value) || !validTenantID(token.TenantID) || len(token.Tools) == 0 {
 			return nil, errors.New("invalid HTTP token configuration")
@@ -70,6 +86,7 @@ func New(manager *execution.Manager, tokens []Token) (*API, error) {
 	a.mux.HandleFunc("GET /readyz", a.ready)
 	a.mux.HandleFunc("POST /api/v1/executions", a.withPrincipal(a.submitExecution))
 	a.mux.HandleFunc("GET /api/v1/executions/{id}", a.withPrincipal(a.getExecution))
+	a.mux.HandleFunc("GET /api/v1/executions/{id}/events", a.withPrincipal(a.streamExecution))
 	a.mux.HandleFunc("POST /api/v1/executions/{id}/cancel", a.withPrincipal(a.cancelExecution))
 	a.mux.HandleFunc("POST /api/v1/workflows", a.withPrincipal(a.submitWorkflow))
 	a.mux.HandleFunc("GET /api/v1/workflows/{id}", a.withPrincipal(a.getWorkflow))
@@ -77,6 +94,7 @@ func New(manager *execution.Manager, tokens []Token) (*API, error) {
 	for pattern, allowed := range map[string]string{
 		"/healthz": "GET", "/readyz": "GET",
 		"/api/v1/executions": "POST", "/api/v1/executions/{id}": "GET",
+		"/api/v1/executions/{id}/events": "GET",
 		"/api/v1/executions/{id}/cancel": "POST",
 		"/api/v1/workflows":              "POST", "/api/v1/workflows/{id}": "GET",
 		"/api/v1/workflows/{id}/cancel": "POST",
@@ -119,6 +137,7 @@ func validTenantID(id string) bool {
 }
 
 func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(15 * time.Second))
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		http.Error(w, "request ID unavailable", http.StatusInternalServerError)
