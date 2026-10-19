@@ -177,6 +177,12 @@ func TestSchemaV1MigratesWithoutLosingExecutions(t *testing.T) {
 	if _, err := s.db.ExecContext(ctx, "DROP TABLE idempotency"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.db.ExecContext(ctx, "DROP TABLE workflow_nodes"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, "DROP TABLE workflows"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.db.ExecContext(ctx, "PRAGMA user_version = 1"); err != nil {
 		t.Fatal(err)
 	}

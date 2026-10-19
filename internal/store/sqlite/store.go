@@ -24,7 +24,7 @@ var (
 	ErrRuntimeOwned    = errors.New("store already has a runtime owner")
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 // Execution contains the data required to reconstruct one execution. Snapshot
 // and Request are JSON encoded by the manager; the store treats them as bytes.
@@ -193,6 +193,34 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			)`,
 			"CREATE INDEX idempotency_by_execution ON idempotency (execution_id)",
 			"PRAGMA user_version = 2",
+		} {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("migrate database: %w", err)
+			}
+		}
+	}
+	if version < 3 {
+		for _, statement := range []string{
+			`CREATE TABLE workflows (
+				id TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL,
+				state TEXT NOT NULL,
+				request BLOB NOT NULL,
+				created_at_ns INTEGER NOT NULL,
+				finished_at_ns INTEGER,
+				version INTEGER NOT NULL CHECK (version > 0)
+			)`,
+			`CREATE INDEX workflows_by_tenant ON workflows (tenant_id, created_at_ns)`,
+			`CREATE TABLE workflow_nodes (
+				workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+				node_id TEXT NOT NULL,
+				position INTEGER NOT NULL CHECK (position >= 0),
+				depends_on BLOB NOT NULL,
+				execution_id TEXT NOT NULL UNIQUE REFERENCES executions(id) ON DELETE RESTRICT,
+				PRIMARY KEY (workflow_id, node_id),
+				UNIQUE (workflow_id, position)
+			)`,
+			"PRAGMA user_version = 3",
 		} {
 			if _, err := tx.ExecContext(ctx, statement); err != nil {
 				return fmt.Errorf("migrate database: %w", err)
