@@ -24,6 +24,8 @@ V1.0 的第一批增加了 [SQLite 存储基础](./docs/V1.0-SQLITE-FOUNDATION.m
 
 第七批增加 [Workflow 幂等提交](./docs/V1.0-WORKFLOW-IDEMPOTENCY.md)：`SubmitWorkflowIdempotent` 将整批 DAG 与幂等键在一个事务中提交；有效键的等价请求在容量已满或服务重启后仍返回原工作流。
 
+第八批增加 [持久化记录保留与容量控制](./docs/V1.0-DURABLE-RETENTION.md)：默认保留终态记录和事件 7 天、最多保存 10000 条 Execution；清理保护活动任务、待清理资源与有效幂等键，Workflow 按整批删除。容量被保护记录占满时拒绝新提交。
+
 ## 项目目标
 
 - **调度**：有界队列、并发配额、DAG 依赖与租户公平调度。

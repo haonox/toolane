@@ -132,6 +132,11 @@ func (m *Manager) submitWorkflow(ctx context.Context, req WorkflowRequest, key s
 	} else if len(req.Nodes) > m.config.TenantPendingLimit {
 		return WorkflowSnapshot{}, ErrTenantQueueFull
 	}
+	if m.store != nil {
+		if err := m.pruneDurableLocked(len(req.Nodes)); err != nil {
+			return WorkflowSnapshot{}, err
+		}
+	}
 	now := time.Now().UTC()
 	w := &workflow{id: workflowID, tenantID: tenantID, state: Running, createdAt: now, remaining: len(req.Nodes)}
 	w.nodes = make([]*record, len(req.Nodes))
