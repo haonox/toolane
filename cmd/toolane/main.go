@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/haonox/toolane/internal/execution"
@@ -17,11 +19,24 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "serve" {
+		if len(os.Args) != 4 || os.Args[2] != "--config" {
+			fmt.Fprintln(os.Stderr, "usage: toolane serve --config /absolute/path/config.json")
+			os.Exit(2)
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := runServer(ctx, os.Args[3]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	kind := "mock"
 	if len(os.Args) == 2 {
 		kind = os.Args[1]
 	} else if len(os.Args) > 2 {
-		fmt.Fprintln(os.Stderr, "usage: toolane [mock|process]")
+		fmt.Fprintln(os.Stderr, "usage: toolane [mock|process] or toolane serve --config /absolute/path/config.json")
 		os.Exit(2)
 	}
 	if err := demo(kind); err != nil {

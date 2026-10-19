@@ -38,6 +38,8 @@ var (
 	// ErrSandboxBudgetExceeded means a registered tool asks for more sandbox
 	// resources than the manager can ever reserve for one execution.
 	ErrSandboxBudgetExceeded = errors.New("sandbox request exceeds configured budget")
+	// ErrInvalidRequest identifies caller-controlled input rejected before admission.
+	ErrInvalidRequest = errors.New("invalid execution request")
 )
 
 // State describes the public execution lifecycle.
@@ -213,6 +215,7 @@ type Stats struct {
 	Stored                     int
 	Tenants                    int
 	Halted                     bool
+	Closing                    bool
 	ReservedSandboxCPUMilli    int
 	ReservedSandboxMemoryBytes int64
 }
@@ -419,7 +422,7 @@ func (m *Manager) prepareRequest(ctx context.Context, req Request) (preparedRequ
 	}
 	def, ok := m.tools[req.Tool]
 	if !ok {
-		return preparedRequest{}, fmt.Errorf("unknown tool %q", req.Tool)
+		return preparedRequest{}, fmt.Errorf("%w: unknown tool %q", ErrInvalidRequest, req.Tool)
 	}
 	if def.Resources.CPUMilli > m.config.SandboxMaxCPUMilli || def.Resources.MemoryBytes > m.config.SandboxMaxMemoryBytes ||
 		def.Resources.CPUMilli > m.config.SandboxCPUBudgetMilli || def.Resources.MemoryBytes > m.config.SandboxMemoryBudgetBytes {
@@ -428,15 +431,15 @@ func (m *Manager) prepareRequest(ctx context.Context, req Request) (preparedRequ
 	policy := m.policies[req.Tool]
 	queueTimeout, err := resolveTimeout(req.QueueTimeout, policy.defaultQueueTimeout, policy.maxQueueTimeout)
 	if err != nil {
-		return preparedRequest{}, fmt.Errorf("queue timeout: %w", err)
+		return preparedRequest{}, fmt.Errorf("%w: queue timeout: %v", ErrInvalidRequest, err)
 	}
 	runTimeout, err := resolveTimeout(req.ExecutionTimeout, policy.defaultRunTimeout, policy.maxRunTimeout)
 	if err != nil {
-		return preparedRequest{}, fmt.Errorf("execution timeout: %w", err)
+		return preparedRequest{}, fmt.Errorf("%w: execution timeout: %v", ErrInvalidRequest, err)
 	}
 	outputLimit := req.OutputLimitBytes
 	if outputLimit < 0 || outputLimit > policy.maxOutputBytes {
-		return preparedRequest{}, errors.New("output limit outside allowed range")
+		return preparedRequest{}, fmt.Errorf("%w: output limit outside allowed range", ErrInvalidRequest)
 	}
 	if outputLimit == 0 {
 		outputLimit = policy.defaultOutputBytes
@@ -445,8 +448,11 @@ func (m *Manager) prepareRequest(ctx context.Context, req Request) (preparedRequ
 		return preparedRequest{}, ErrArgumentsTooLarge
 	}
 	arguments := append(json.RawMessage(nil), req.Arguments...)
+	if len(arguments) > 0 && !json.Valid(arguments) {
+		return preparedRequest{}, fmt.Errorf("%w: tool arguments must be JSON", ErrInvalidRequest)
+	}
 	if err := def.Validate(arguments); err != nil {
-		return preparedRequest{}, fmt.Errorf("invalid tool arguments: %w", err)
+		return preparedRequest{}, fmt.Errorf("%w: invalid tool arguments: %v", ErrInvalidRequest, err)
 	}
 	return preparedRequest{request: req, arguments: arguments, policy: policy, queueTimeout: queueTimeout, runTimeout: runTimeout, outputLimit: outputLimit, resources: def.Resources}, nil
 }
@@ -607,7 +613,7 @@ func (m *Manager) Cancel(id string) (Snapshot, error) {
 func (m *Manager) Stats() Stats {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return Stats{Queued: len(m.queue), Blocked: m.pending - len(m.queue), Pending: m.pending, Running: m.running, Stored: len(m.records), Tenants: len(m.tenants), Halted: m.halted, ReservedSandboxCPUMilli: m.reservedSandboxCPUMilli, ReservedSandboxMemoryBytes: m.reservedSandboxMemoryBytes}
+	return Stats{Queued: len(m.queue), Blocked: m.pending - len(m.queue), Pending: m.pending, Running: m.running, Stored: len(m.records), Tenants: len(m.tenants), Halted: m.halted, Closing: m.closing, ReservedSandboxCPUMilli: m.reservedSandboxCPUMilli, ReservedSandboxMemoryBytes: m.reservedSandboxMemoryBytes}
 }
 
 // Close stops admission, cancels accepted work, and waits for all owned
