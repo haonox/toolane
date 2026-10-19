@@ -38,6 +38,8 @@ V1.0 的第一批增加了 [SQLite 存储基础](./docs/V1.0-SQLITE-FOUNDATION.m
 
 第十四批增加 [结构化日志](./docs/V1.0-STRUCTURED-LOGS.md)：本地服务向标准错误输出写入 JSON 请求、执行状态与恢复日志，以受控字段关联 request、Execution、Workflow 和 Tenant ID；不记录 Token、参数或工具输出。
 
+第十五批增加 [Python 调用示例](./docs/V1.0-PYTHON-EXAMPLE.md)：标准库脚本通过本地 HTTP API 提交、查询和取消 Mock 任务，演示 Token、幂等键及终态处理。
+
 ## 项目目标
 
 - **调度**：有界队列、并发配额、DAG 依赖与租户公平调度。
@@ -121,6 +123,7 @@ Process Executor 只运行可信工具；Docker 版本针对常见资源滥用�
 | [docs/V1.0-METRICS.md](./docs/V1.0-METRICS.md) | 独立管理端口、指标语义与安全边界 |
 | [docs/V1.0-RECOVERY-CLEANUP.md](./docs/V1.0-RECOVERY-CLEANUP.md) | 重启回收后清理状态协调与持久化验证 |
 | [docs/V1.0-STRUCTURED-LOGS.md](./docs/V1.0-STRUCTURED-LOGS.md) | 服务 JSON 日志字段、隐私边界与日志丢弃策略 |
+| [docs/V1.0-PYTHON-EXAMPLE.md](./docs/V1.0-PYTHON-EXAMPLE.md) | Python 标准库调用示例与本地运行方法 |
 
 **协作 AI 开始工作前须读取上述两份文档与本 README。** 未指定阶段时只开发 V0.1；不要提前实现整条路线。
 
