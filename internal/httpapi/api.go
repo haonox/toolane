@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"strings"
@@ -38,11 +39,25 @@ type principal struct {
 }
 
 type requestIDKey struct{}
+type requestTraceKey struct{}
+
+type requestTrace struct {
+	tenantID    string
+	executionID string
+	workflowID  string
+	errorCode   string
+}
+
+func traceOf(r *http.Request) *requestTrace {
+	trace, _ := r.Context().Value(requestTraceKey{}).(*requestTrace)
+	return trace
+}
 
 // API owns only HTTP transport state; callers own and close the Manager.
 type API struct {
 	manager    *execution.Manager
 	metrics    *observability.Recorder
+	logger     *slog.Logger
 	tokens     map[[32]byte]principal
 	mux        *http.ServeMux
 	sseOptions SSEOptions
@@ -117,10 +132,18 @@ func (a *API) EnableMetrics(recorder *observability.Recorder) {
 	a.metrics = recorder
 }
 
+// EnableLogger attaches a structured request logger before ServeHTTP is used.
+// Request bodies, raw paths, credentials and tool output are never logged.
+func (a *API) EnableLogger(logger *slog.Logger) {
+	a.logger = logger
+}
+
 type statusWriter struct {
 	http.ResponseWriter
 	status int
 }
+
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func (w *statusWriter) WriteHeader(status int) {
 	if w.status == 0 {
@@ -187,7 +210,34 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	id := hex.EncodeToString(raw[:])
 	w.Header().Set("X-Request-ID", id)
-	a.mux.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDKey{}, id)))
+	trace := &requestTrace{}
+	request := r.WithContext(context.WithValue(context.WithValue(r.Context(), requestIDKey{}, id), requestTraceKey{}, trace))
+	if a.logger == nil {
+		a.mux.ServeHTTP(w, request)
+		return
+	}
+	start := time.Now()
+	response := &statusWriter{ResponseWriter: w}
+	a.mux.ServeHTTP(response, request)
+	status := response.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	attrs := []any{"request_id", id, "method", r.Method, "route", request.Pattern,
+		"http_status", status, "duration_ms", time.Since(start).Milliseconds()}
+	if trace.tenantID != "" {
+		attrs = append(attrs, "tenant_id", trace.tenantID)
+	}
+	if trace.executionID != "" {
+		attrs = append(attrs, "execution_id", trace.executionID)
+	}
+	if trace.workflowID != "" {
+		attrs = append(attrs, "workflow_id", trace.workflowID)
+	}
+	if trace.errorCode != "" {
+		attrs = append(attrs, "error_code", trace.errorCode)
+	}
+	a.logger.Info("http_request", attrs...)
 }
 
 func (a *API) withPrincipal(next func(http.ResponseWriter, *http.Request, principal)) http.HandlerFunc {
@@ -206,6 +256,9 @@ func (a *API) withPrincipal(next func(http.ResponseWriter, *http.Request, princi
 		if !ok {
 			writeError(w, r, http.StatusUnauthorized, "unauthorized", "valid Bearer token required")
 			return
+		}
+		if trace := traceOf(r); trace != nil {
+			trace.tenantID = p.tenantID
 		}
 		next(w, r, p)
 	}
@@ -308,6 +361,9 @@ func (a *API) submitExecution(w http.ResponseWriter, r *http.Request, p principa
 		a.managerError(w, r, err)
 		return
 	}
+	if trace := traceOf(r); trace != nil {
+		trace.executionID = snapshot.ID
+	}
 	writeJSON(w, http.StatusAccepted, viewExecution(snapshot))
 }
 
@@ -387,6 +443,9 @@ func (a *API) submitWorkflow(w http.ResponseWriter, r *http.Request, p principal
 		a.managerError(w, r, err)
 		return
 	}
+	if trace := traceOf(r); trace != nil {
+		trace.workflowID = snapshot.ID
+	}
 	writeJSON(w, http.StatusAccepted, viewWorkflow(snapshot))
 }
 
@@ -399,6 +458,9 @@ func (a *API) getExecution(w http.ResponseWriter, r *http.Request, p principal) 
 	if snapshot.TenantID != p.tenantID {
 		writeError(w, r, http.StatusNotFound, "not_found", "execution not found")
 		return
+	}
+	if trace := traceOf(r); trace != nil {
+		trace.executionID = snapshot.ID
 	}
 	writeJSON(w, http.StatusOK, viewExecution(snapshot))
 }
@@ -413,6 +475,9 @@ func (a *API) cancelExecution(w http.ResponseWriter, r *http.Request, p principa
 	if before.TenantID != p.tenantID {
 		writeError(w, r, http.StatusNotFound, "not_found", "execution not found")
 		return
+	}
+	if trace := traceOf(r); trace != nil {
+		trace.executionID = before.ID
 	}
 	snapshot, err := a.manager.Cancel(id)
 	if err != nil {
@@ -436,6 +501,9 @@ func (a *API) getWorkflow(w http.ResponseWriter, r *http.Request, p principal) {
 		writeError(w, r, http.StatusNotFound, "not_found", "workflow not found")
 		return
 	}
+	if trace := traceOf(r); trace != nil {
+		trace.workflowID = snapshot.ID
+	}
 	writeJSON(w, http.StatusOK, viewWorkflow(snapshot))
 }
 
@@ -449,6 +517,9 @@ func (a *API) cancelWorkflow(w http.ResponseWriter, r *http.Request, p principal
 	if before.TenantID != p.tenantID {
 		writeError(w, r, http.StatusNotFound, "not_found", "workflow not found")
 		return
+	}
+	if trace := traceOf(r); trace != nil {
+		trace.workflowID = before.ID
 	}
 	snapshot, err := a.manager.CancelWorkflow(id)
 	if err != nil {
@@ -507,6 +578,9 @@ func writeInputError(w http.ResponseWriter, r *http.Request, err error) {
 }
 
 func writeError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
+	if trace := traceOf(r); trace != nil {
+		trace.errorCode = code
+	}
 	id, _ := r.Context().Value(requestIDKey{}).(string)
 	writeJSON(w, status, struct {
 		Code      string `json:"code"`

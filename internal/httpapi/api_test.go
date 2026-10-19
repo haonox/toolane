@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -72,6 +73,83 @@ func request(t *testing.T, api *API, method, path, token, body, key string) *htt
 		t.Fatal("missing request ID")
 	}
 	return w
+}
+
+func TestStructuredRequestLogsKeepIdentityAndExcludePayload(t *testing.T) {
+	api := apiFixture(t)
+	var output bytes.Buffer
+	api.EnableLogger(slog.New(slog.NewJSONHandler(&output, nil)))
+	secret := "private-payload-sentinel"
+	if got := request(t, api, "POST", "/api/v1/executions", "wrong-secret-123456", `{"tool":"mock.delay"}`, ""); got.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status: %d", got.Code)
+	}
+	accepted := request(t, api, "POST", "/api/v1/executions", firstToken,
+		`{"tool":"mock.delay","arguments":{"delay_ms":0,"value":"`+secret+`"}}`, "")
+	if accepted.Code != http.StatusAccepted {
+		t.Fatalf("admission status: %d %s", accepted.Code, accepted.Body.String())
+	}
+	var created executionView
+	if err := json.Unmarshal(accepted.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/v1/executions/" + created.ID
+	if got := request(t, api, "GET", path, secondToken, "", ""); got.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant query status: %d", got.Code)
+	}
+	if got := request(t, api, "GET", path, firstToken, "", ""); got.Code != http.StatusOK {
+		t.Fatalf("owner query status: %d", got.Code)
+	}
+	deadline := time.After(2 * time.Second)
+	for {
+		snapshot, err := api.manager.Get(created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.FinishedAt != nil {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("mock execution did not finish")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if got := request(t, api, "GET", path+"/events", firstToken, "", ""); got.Code != http.StatusOK || !strings.Contains(got.Body.String(), "event: end\n") {
+		t.Fatalf("logged SSE response: %d %s", got.Code, got.Body.String())
+	}
+	workflow := request(t, api, "POST", "/api/v1/workflows", firstToken,
+		`{"nodes":[{"node_id":"first","tool":"mock.delay","arguments":{"delay_ms":0,"value":"`+secret+`"}}]}`, "")
+	if workflow.Code != http.StatusAccepted {
+		t.Fatalf("workflow admission status: %d %s", workflow.Code, workflow.Body.String())
+	}
+	var createdWorkflow workflowView
+	if err := json.Unmarshal(workflow.Body.Bytes(), &createdWorkflow); err != nil {
+		t.Fatal(err)
+	}
+	if createdWorkflow.ID == "" {
+		t.Fatal("accepted workflow has no ID")
+	}
+	text := output.String()
+	for _, forbidden := range []string{firstToken, secondToken, secret, "wrong-secret-123456"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("request log leaked %q: %s", forbidden, text)
+		}
+	}
+	var entries []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(text), "\n") {
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("invalid JSON log: %v", err)
+		}
+		entries = append(entries, entry)
+	}
+	if len(entries) != 6 || entries[0]["error_code"] != "unauthorized" || entries[0]["tenant_id"] != nil ||
+		entries[1]["tenant_id"] != "first" || entries[1]["execution_id"] != created.ID ||
+		entries[2]["tenant_id"] != "second" || entries[2]["execution_id"] != nil ||
+		entries[3]["route"] != "GET /api/v1/executions/{id}" || entries[4]["http_status"] != float64(http.StatusOK) ||
+		entries[5]["workflow_id"] != createdWorkflow.ID {
+		t.Fatalf("unexpected request log fields: %+v", entries)
+	}
 }
 
 func TestHTTPAuthorizationAndTenantIsolation(t *testing.T) {

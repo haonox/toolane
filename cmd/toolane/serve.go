@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/haonox/toolane/internal/execution"
@@ -42,6 +44,16 @@ type serverDockerConfig struct {
 }
 
 const sandboxToolName = "sandbox.shell"
+
+type transitionLog struct {
+	executionID   string
+	workflowID    string
+	tenantID      string
+	fromState     execution.State
+	toState       execution.State
+	cleanupStatus string
+	errorCode     string
+}
 
 func loadServerConfig(path string) (serverConfig, error) {
 	info, err := os.Lstat(path)
@@ -129,6 +141,10 @@ func loadServerConfig(path string) (serverConfig, error) {
 // runServer assembles the local durable service. Docker is optional and its
 // recovery and policy preflight must complete before HTTP admission opens.
 func runServer(ctx context.Context, configPath string) (retErr error) {
+	return runServerWithLogger(ctx, configPath, slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+}
+
+func runServerWithLogger(ctx context.Context, configPath string, logger *slog.Logger) (retErr error) {
 	config, err := loadServerConfig(configPath)
 	if err != nil {
 		return err
@@ -168,6 +184,24 @@ func runServer(ctx context.Context, configPath string) (retErr error) {
 		return err
 	}
 	metrics := &observability.Recorder{}
+	transitionEvents := make(chan transitionLog, 1024)
+	transitionDone := make(chan struct{})
+	var droppedTransitions atomic.Uint64
+	go func() {
+		defer close(transitionDone)
+		for event := range transitionEvents {
+			logger.Info("execution_transition", "execution_id", event.executionID, "workflow_id", event.workflowID,
+				"tenant_id", event.tenantID, "from_state", event.fromState, "to_state", event.toState,
+				"cleanup_status", event.cleanupStatus, "error_code", event.errorCode)
+		}
+	}()
+	defer func() {
+		close(transitionEvents)
+		<-transitionDone
+		if count := droppedTransitions.Load(); count > 0 {
+			logger.Warn("transition_logs_dropped", "count", count)
+		}
+	}()
 	var pendingRecovery []execution.RecoveryResource
 	manager, err := execution.NewDurableManager(ctx, execution.DefaultConfig(), registry, store,
 		func(ctx context.Context, resources []execution.RecoveryResource) error {
@@ -184,11 +218,21 @@ func runServer(ctx context.Context, configPath string) (retErr error) {
 					}
 				}
 			}
+			logger.Info("recovery_complete", "resources_checked", len(resources), "resources_pending", len(pendingRecovery))
 			return nil
 		}, func(before, after execution.Snapshot) {
 			metrics.RecordChange(observability.Change{BeforeState: string(before.State), AfterState: string(after.State),
 				BeforeCleanup: before.CleanupStatus, AfterCleanup: after.CleanupStatus, CreatedAt: after.CreatedAt,
 				RunningAt: after.RunningAt, ProcessStartedAt: after.ProcessStartedAt, FinishedAt: after.FinishedAt})
+			if before.State != after.State || before.CleanupStatus != after.CleanupStatus {
+				event := transitionLog{executionID: after.ID, workflowID: after.WorkflowID, tenantID: after.TenantID,
+					fromState: before.State, toState: after.State, cleanupStatus: after.CleanupStatus, errorCode: after.ErrorCode}
+				select {
+				case transitionEvents <- event:
+				default:
+					droppedTransitions.Add(1)
+				}
+			}
 		})
 	if err != nil {
 		return err
@@ -203,7 +247,7 @@ func runServer(ctx context.Context, configPath string) (retErr error) {
 		watchDone := make(chan struct{})
 		go func() {
 			defer close(watchDone)
-			watchRecoveredCleanup(watchCtx, dockerBackend, manager, pendingRecovery)
+			watchRecoveredCleanup(watchCtx, dockerBackend, manager, pendingRecovery, logger)
 		}()
 		defer func() {
 			watchCancel()
@@ -217,6 +261,7 @@ func runServer(ctx context.Context, configPath string) (retErr error) {
 		return err
 	}
 	api.EnableMetrics(metrics)
+	api.EnableLogger(logger)
 	listener, err := net.Listen("tcp", config.Listen)
 	if err != nil {
 		return err
@@ -256,9 +301,9 @@ func runServer(ctx context.Context, configPath string) (retErr error) {
 	if metricsServer != nil {
 		go func() { served <- metricsServer.Serve(metricsListener) }()
 	}
-	fmt.Printf("Toolane HTTP ready at %s\n", listener.Addr())
+	logger.Info("service_ready", "http_listen", listener.Addr().String())
 	if metricsListener != nil {
-		fmt.Printf("Toolane metrics ready at %s\n", metricsListener.Addr())
+		logger.Info("metrics_ready", "metrics_listen", metricsListener.Addr().String())
 	}
 	select {
 	case <-ctx.Done():
@@ -309,7 +354,7 @@ func recoverServerResources(ctx context.Context, backend *docker.Backend, config
 
 // watchRecoveredCleanup follows bounded Docker retry work without retaining a
 // running execution slot. A later restart also rechecks any still-pending ID.
-func watchRecoveredCleanup(ctx context.Context, backend *docker.Backend, manager *execution.Manager, resources []execution.RecoveryResource) {
+func watchRecoveredCleanup(ctx context.Context, backend *docker.Backend, manager *execution.Manager, resources []execution.RecoveryResource, logger *slog.Logger) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for len(resources) > 0 {
@@ -326,6 +371,8 @@ func watchRecoveredCleanup(ctx context.Context, backend *docker.Backend, manager
 				}
 				if err := manager.ConfirmRecoveredCleanup(resource.ExecutionID, resource.Ref); err != nil {
 					remaining = append(remaining, resource)
+				} else {
+					logger.Info("recovered_cleanup_confirmed", "execution_id", resource.ExecutionID)
 				}
 			}
 			resources = remaining
