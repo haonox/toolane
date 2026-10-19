@@ -16,8 +16,6 @@ import (
 
 const executionEndpoint = "POST /api/v1/executions"
 
-var ErrDurableWorkflowPending = errors.New("durable workflows are not available yet")
-
 type storedRecord struct {
 	Snapshot  Snapshot          `json:"snapshot"`
 	Arguments []byte            `json:"arguments"`
@@ -84,7 +82,15 @@ func NewDurableManager(ctx context.Context, config Config, registry *tool.Regist
 	if err := recoverResources(ctx, resources); err != nil {
 		return nil, fmt.Errorf("recover owned resources: %w", err)
 	}
-	if err := m.recoverExecutions(rows); err != nil {
+	workflows, err := store.ListWorkflows(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list workflows before recovery: %w", err)
+	}
+	workflowNodes, err := m.recoverWorkflows(workflows)
+	if err != nil {
+		return nil, fmt.Errorf("recover workflows: %w", err)
+	}
+	if err := m.recoverExecutions(rows, workflowNodes); err != nil {
 		return nil, fmt.Errorf("recover executions: %w", err)
 	}
 	m.runtimeRelease = release
@@ -215,6 +221,77 @@ func (m *Manager) createStoredExecutionLocked(ctx context.Context, r *record, re
 	return r.snapshot.ID, false, nil
 }
 
+func (m *Manager) createStoredWorkflowLocked(ctx context.Context, request WorkflowRequest, prepared []preparedRequest, w *workflow) error {
+	encodedRequest, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	stored := sqlite.Workflow{ID: w.id, TenantID: w.tenantID, State: string(w.state), Request: encodedRequest, CreatedAt: w.createdAt}
+	stored.Nodes = make([]sqlite.WorkflowNode, len(w.nodes))
+	for i, r := range w.nodes {
+		encoded, err := encodeStoredExecution(r, r.snapshot)
+		if err != nil {
+			return err
+		}
+		normalized, err := encodeNormalizedRequest(prepared[i])
+		if err != nil {
+			return err
+		}
+		event, err := stateEvent(r.snapshot, w.createdAt)
+		if err != nil {
+			return err
+		}
+		stored.Nodes[i] = sqlite.WorkflowNode{
+			NodeID: request.Nodes[i].ID, DependsOn: request.Nodes[i].DependsOn,
+			Execution: sqlite.Execution{ID: r.snapshot.ID, TenantID: w.tenantID, State: string(r.snapshot.State), Snapshot: encoded, Request: normalized, CreatedAt: w.createdAt},
+			Event:     event,
+		}
+	}
+	if err := m.store.CreateWorkflow(ctx, stored); err != nil {
+		m.haltStoreLocked(err)
+		return err
+	}
+	w.version = 1
+	for _, r := range w.nodes {
+		r.version = 1
+	}
+	return nil
+}
+
+func (m *Manager) transitionWorkflowLocked(w *workflow, state State, finishedAt *time.Time) error {
+	if w.state == state && (w.finishedAt != nil) == (finishedAt != nil) {
+		return nil
+	}
+	if m.store != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		version, err := m.store.TransitionWorkflow(ctx, w.id, w.version, string(state), finishedAt)
+		if err != nil {
+			m.haltStoreLocked(err)
+			return err
+		}
+		w.version = version
+	}
+	w.state = state
+	w.finishedAt = finishedAt
+	return nil
+}
+
+func decodeStoredWorkflowSnapshot(stored sqlite.Workflow) (WorkflowSnapshot, error) {
+	snapshot := WorkflowSnapshot{ID: stored.ID, TenantID: stored.TenantID, State: State(stored.State), CreatedAt: stored.CreatedAt, FinishedAt: stored.FinishedAt, Nodes: make([]Snapshot, len(stored.Nodes))}
+	for i, node := range stored.Nodes {
+		r, err := decodeStoredExecution(node.Execution)
+		if err != nil {
+			return WorkflowSnapshot{}, err
+		}
+		if r.snapshot.WorkflowID != stored.ID || r.snapshot.NodeID != node.NodeID || r.snapshot.TenantID != stored.TenantID {
+			return WorkflowSnapshot{}, fmt.Errorf("workflow %s has inconsistent node %q", stored.ID, node.NodeID)
+		}
+		snapshot.Nodes[i] = cloneSnapshot(r.snapshot)
+	}
+	return snapshot, nil
+}
+
 func (m *Manager) applySnapshotLocked(r *record, next Snapshot) error {
 	return m.applySnapshotKindLocked(r, next, "state")
 }
@@ -301,14 +378,17 @@ func (m *Manager) haltStoreLocked(err error) {
 	m.cond.Broadcast()
 }
 
-func (m *Manager) recoverExecutions(rows []sqlite.Execution) error {
+func (m *Manager) recoverExecutions(rows []sqlite.Execution, workflowNodes map[string]bool) error {
 	for _, row := range rows {
 		r, err := decodeStoredExecution(row)
 		if err != nil {
 			return err
 		}
 		if r.snapshot.WorkflowID != "" {
-			return ErrDurableWorkflowPending
+			if !workflowNodes[row.ID] {
+				return fmt.Errorf("execution %s references an unknown workflow", row.ID)
+			}
+			continue
 		}
 		m.records[r.snapshot.ID] = r
 		switch r.snapshot.State {

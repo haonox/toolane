@@ -14,11 +14,13 @@ V1.0 的第一批增加了 [SQLite 存储基础](./docs/V1.0-SQLITE-FOUNDATION.m
 
 第二批增加了 [存储层幂等准入](./docs/V1.0-IDEMPOTENCY.md)：同一租户、提交端点和键的并发重复提交只创建一条任务记录；请求不同则冲突，24 小时后可重用键。其单任务 Manager 接入见第三批；HTTP 接口尚未实现。
 
-第三批增加了 [单任务持久化运行路径](./docs/V1.0-DURABLE-SINGLE.md)：`NewDurableManager` 在准入、认领和状态变化时写入 SQLite，重启前先确认资源回收，再续调未认领任务并中断旧的已认领任务。该模式现可通过 Go API 使用；CLI 仍使用内存模式，持久化 Workflow 和 HTTP/SSE 尚未实现。
+第三批增加了 [单任务持久化运行路径](./docs/V1.0-DURABLE-SINGLE.md)：`NewDurableManager` 在准入、认领和状态变化时写入 SQLite，重启前先确认资源回收，再续调未认领任务并中断旧的已认领任务。该模式现可通过 Go API 使用；CLI 仍使用内存模式，HTTP/SSE 尚未实现。
 
 第四批补充 [Docker 资源归属持久化](./docs/V1.0-DOCKER-OWNERSHIP.md)：容器创建后、启动前先记录容器 ID 与部署实例 ID；重启恢复回调收到这些记录，同时仍需扫描归属标签来覆盖 ID 尚未落盘的崩溃窗口。真实 Docker 恢复测试需在可访问 Docker daemon 的环境运行。
 
-第五批增加 [Workflow 存储基础](./docs/V1.0-WORKFLOW-STORE.md)：一次事务写入 Workflow、节点关系、各节点 Execution 和首个事件，并可在重启后按提交顺序读取。`NewDurableManager` 的 Workflow 调度与恢复尚未接入，当前仍拒绝持久化 Workflow 提交。
+第五批增加 [Workflow 存储基础](./docs/V1.0-WORKFLOW-STORE.md)：一次事务写入 Workflow、节点关系、各节点 Execution 和首个事件，并可在重启后按提交顺序读取。
+
+第六批接入 [持久化 Workflow 运行与恢复](./docs/V1.0-DURABLE-WORKFLOW.md)：`NewDurableManager` 可执行静态 DAG；节点状态、事件及工作流汇总状态落盘。重启时重建依赖，继续未认领节点，已认领节点标记为 `interrupted`，独立分支继续执行。
 
 ## 项目目标
 
@@ -66,7 +68,7 @@ go test -race ./...
 go vet ./...
 ```
 
-演示提供 `mock.delay` 与 `process.printf`；调用方也可在服务端注册其他可信工具或 Docker Shell 工具。V0.2 的租户 ID 只由可信进程内调用方提供，不构成身份认证；可配置 `SchedulerFIFO` 作为实验基线。CLI 使用的 `NewManager` 仍只保留内存状态；单任务可通过 `NewDurableManager` 使用 SQLite，但尚无 HTTP 服务。Docker 仅面向 Linux 主机；服务启动时可按实例标签回收残留容器，删除失败会有界重试，调用方须保存稳定实例 ID 并在准入前调用恢复接口。Process Executor 与真实进程测试也以 Linux 为目标；其他平台会返回 `process_unsupported`。
+演示提供 `mock.delay` 与 `process.printf`；调用方也可在服务端注册其他可信工具或 Docker Shell 工具。V0.2 的租户 ID 只由可信进程内调用方提供，不构成身份认证；可配置 `SchedulerFIFO` 作为实验基线。CLI 使用的 `NewManager` 仍只保留内存状态；单任务与 Workflow 可通过 `NewDurableManager` 使用 SQLite，但尚无 HTTP 服务。Docker 仅面向 Linux 主机；服务启动时可按实例标签回收残留容器，删除失败会有界重试，调用方须保存稳定实例 ID 并在准入前调用恢复接口。Process Executor 与真实进程测试也以 Linux 为目标；其他平台会返回 `process_unsupported`。
 
 ## 项目边界
 
@@ -94,6 +96,7 @@ Process Executor 只运行可信工具；Docker 版本针对常见资源滥用�
 | [docs/V1.0-DURABLE-SINGLE.md](./docs/V1.0-DURABLE-SINGLE.md) | 单任务持久化 Manager 的启动、准入、认领与重启语义 |
 | [docs/V1.0-DOCKER-OWNERSHIP.md](./docs/V1.0-DOCKER-OWNERSHIP.md) | Docker 容器 ID 落盘顺序、标签兜底与恢复测试 |
 | [docs/V1.0-WORKFLOW-STORE.md](./docs/V1.0-WORKFLOW-STORE.md) | Schema v3、Workflow 整批事务准入与重启读取 |
+| [docs/V1.0-DURABLE-WORKFLOW.md](./docs/V1.0-DURABLE-WORKFLOW.md) | 持久化 DAG 的调度、取消与重启恢复语义 |
 
 **协作 AI 开始工作前须读取上述两份文档与本 README。** 未指定阶段时只开发 V0.1；不要提前实现整条路线。
 

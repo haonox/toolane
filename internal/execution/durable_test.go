@@ -61,9 +61,6 @@ func TestDurableAdmissionClaimAndCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.SubmitWorkflow(ctx, WorkflowRequest{Nodes: []WorkflowNode{{ID: "a", Tool: "test"}}}); !errors.Is(err, ErrDurableWorkflowPending) {
-		t.Fatalf("durable workflow was accepted: %v", err)
-	}
 	accepted, err := m.Submit(ctx, Request{Tool: "test", Arguments: json.RawMessage(`{"x":1}`)})
 	if err != nil {
 		t.Fatal(err)

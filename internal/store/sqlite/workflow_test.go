@@ -124,6 +124,35 @@ func TestGetWorkflowRejectsIncompleteNodeData(t *testing.T) {
 	}
 }
 
+func TestWorkflowSummaryTransitionAndList(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	record := workflowFixture()
+	if err := s.CreateWorkflow(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	version, err := s.TransitionWorkflow(ctx, record.ID, 1, "cancelling", nil)
+	if err != nil || version != 2 {
+		t.Fatalf("cancelling transition: version=%d err=%v", version, err)
+	}
+	if _, err := s.TransitionWorkflow(ctx, record.ID, 1, "failed", nil); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("stale workflow transition: %v", err)
+	}
+	finished := record.CreatedAt.Add(1)
+	version, err = s.TransitionWorkflow(ctx, record.ID, 2, "cancelled", &finished)
+	if err != nil || version != 3 {
+		t.Fatalf("final transition: version=%d err=%v", version, err)
+	}
+	rows, err := s.ListWorkflows(ctx)
+	if err != nil || len(rows) != 1 || rows[0].State != "cancelled" || rows[0].Version != 3 || rows[0].FinishedAt == nil || !rows[0].FinishedAt.Equal(finished) || len(rows[0].Nodes) != 2 {
+		t.Fatalf("listed workflow: %+v err=%v", rows, err)
+	}
+}
+
 func TestSchemaV2MigratesWithExistingExecutionAndIdempotency(t *testing.T) {
 	ctx := context.Background()
 	dir := filepath.Join(t.TempDir(), "state")

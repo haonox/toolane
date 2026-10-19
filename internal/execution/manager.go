@@ -187,16 +187,17 @@ type Snapshot struct {
 }
 
 type record struct {
-	snapshot   Snapshot
-	arguments  json.RawMessage
-	deadline   time.Time
-	version    int64
-	resource   *tool.ResourceRef
-	cancel     context.CancelFunc
-	tenant     *tenantState
-	workflow   *workflow
-	dependsOn  []*record
-	dependents []*record
+	snapshot        Snapshot
+	arguments       json.RawMessage
+	deadline        time.Time
+	version         int64
+	resource        *tool.ResourceRef
+	cancel          context.CancelFunc
+	tenant          *tenantState
+	workflow        *workflow
+	dependsOn       []*record
+	dependents      []*record
+	terminalCounted bool
 }
 
 // Stats reports current capacity use. It is a snapshot, not a reservation.
@@ -604,8 +605,10 @@ func (m *Manager) Close(ctx context.Context) error {
 		m.closing = true
 		for _, w := range m.workflows {
 			if w.remaining > 0 {
+				if err := m.transitionWorkflowLocked(w, Cancelling, nil); err != nil {
+					closeErr = errors.Join(closeErr, err)
+				}
 				w.cancelled = true
-				w.state = Cancelling
 			}
 		}
 		for len(m.queue) > 0 {
@@ -713,7 +716,9 @@ func (m *Manager) finishWithSnapshotLocked(r *record, base Snapshot, state State
 	}
 	r.arguments = nil
 	if r.workflow != nil {
-		m.workflowNodeFinishedLocked(r)
+		if err := m.workflowNodeFinishedLocked(r); err != nil {
+			return err
+		}
 	} else {
 		m.retainTerminalLocked(terminalGroup{ids: []string{r.snapshot.ID}})
 	}
