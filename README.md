@@ -18,6 +18,8 @@ V1.0 的第一批增加了 [SQLite 存储基础](./docs/V1.0-SQLITE-FOUNDATION.m
 
 第四批补充 [Docker 资源归属持久化](./docs/V1.0-DOCKER-OWNERSHIP.md)：容器创建后、启动前先记录容器 ID 与部署实例 ID；重启恢复回调收到这些记录，同时仍需扫描归属标签来覆盖 ID 尚未落盘的崩溃窗口。真实 Docker 恢复测试需在可访问 Docker daemon 的环境运行。
 
+第五批增加 [Workflow 存储基础](./docs/V1.0-WORKFLOW-STORE.md)：一次事务写入 Workflow、节点关系、各节点 Execution 和首个事件，并可在重启后按提交顺序读取。`NewDurableManager` 的 Workflow 调度与恢复尚未接入，当前仍拒绝持久化 Workflow 提交。
+
 ## 项目目标
 
 - **调度**：有界队列、并发配额、DAG 依赖与租户公平调度。
@@ -91,6 +93,7 @@ Process Executor 只运行可信工具；Docker 版本针对常见资源滥用�
 | [docs/V1.0-IDEMPOTENCY.md](./docs/V1.0-IDEMPOTENCY.md) | Schema v2、事务化幂等准入及验证范围 |
 | [docs/V1.0-DURABLE-SINGLE.md](./docs/V1.0-DURABLE-SINGLE.md) | 单任务持久化 Manager 的启动、准入、认领与重启语义 |
 | [docs/V1.0-DOCKER-OWNERSHIP.md](./docs/V1.0-DOCKER-OWNERSHIP.md) | Docker 容器 ID 落盘顺序、标签兜底与恢复测试 |
+| [docs/V1.0-WORKFLOW-STORE.md](./docs/V1.0-WORKFLOW-STORE.md) | Schema v3、Workflow 整批事务准入与重启读取 |
 
 **协作 AI 开始工作前须读取上述两份文档与本 README。** 未指定阶段时只开发 V0.1；不要提前实现整条路线。
 
