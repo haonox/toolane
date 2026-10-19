@@ -168,13 +168,21 @@ func runServer(ctx context.Context, configPath string) (retErr error) {
 		return err
 	}
 	metrics := &observability.Recorder{}
+	var pendingRecovery []execution.RecoveryResource
 	manager, err := execution.NewDurableManager(ctx, execution.DefaultConfig(), registry, store,
 		func(ctx context.Context, resources []execution.RecoveryResource) error {
 			if err := recoverServerResources(ctx, dockerBackend, config.Docker, resources); err != nil {
 				return err
 			}
 			if config.Docker != nil {
-				return bindDockerInstance(config.StateDir, config.Docker.InstanceID)
+				if err := bindDockerInstance(config.StateDir, config.Docker.InstanceID); err != nil {
+					return err
+				}
+				for _, resource := range resources {
+					if !resource.AbsentConfirmed {
+						pendingRecovery = append(pendingRecovery, resource)
+					}
+				}
 			}
 			return nil
 		}, func(before, after execution.Snapshot) {
@@ -190,6 +198,18 @@ func runServer(ctx context.Context, configPath string) (retErr error) {
 		defer cancel()
 		retErr = errors.Join(retErr, manager.Close(closeCtx))
 	}()
+	if len(pendingRecovery) > 0 {
+		watchCtx, watchCancel := context.WithCancel(context.Background())
+		watchDone := make(chan struct{})
+		go func() {
+			defer close(watchDone)
+			watchRecoveredCleanup(watchCtx, dockerBackend, manager, pendingRecovery)
+		}()
+		defer func() {
+			watchCancel()
+			<-watchDone
+		}()
+	}
 	sseOptions := httpapi.DefaultSSEOptions()
 	sseOptions.TenantLimit, sseOptions.GlobalLimit = config.SSETenantLimit, config.SSEGlobalLimit
 	api, err := httpapi.New(manager, config.Tokens, sseOptions)
@@ -274,15 +294,43 @@ func recoverServerResources(ctx context.Context, backend *docker.Backend, config
 	if err := backend.Recover(ctx); err != nil {
 		return fmt.Errorf("recover Docker containers: %w", err)
 	}
-	for _, resource := range resources {
-		if err := backend.ConfirmRecoveredResource(ctx, resource.ExecutionID, resource.Ref); err != nil {
-			return fmt.Errorf("confirm recovered execution %s: %w", resource.ExecutionID, err)
+	for i := range resources {
+		absent, err := backend.ConfirmRecoveredResource(ctx, resources[i].ExecutionID, resources[i].Ref)
+		if err != nil {
+			return fmt.Errorf("confirm recovered execution %s: %w", resources[i].ExecutionID, err)
 		}
+		resources[i].AbsentConfirmed = absent
 	}
 	if err := backend.Check(ctx); err != nil {
 		return fmt.Errorf("check Docker sandbox policy: %w", err)
 	}
 	return nil
+}
+
+// watchRecoveredCleanup follows bounded Docker retry work without retaining a
+// running execution slot. A later restart also rechecks any still-pending ID.
+func watchRecoveredCleanup(ctx context.Context, backend *docker.Backend, manager *execution.Manager, resources []execution.RecoveryResource) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for len(resources) > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			remaining := resources[:0]
+			for _, resource := range resources {
+				absent, err := backend.ConfirmRecoveredResource(ctx, resource.ExecutionID, resource.Ref)
+				if err != nil || !absent {
+					remaining = append(remaining, resource)
+					continue
+				}
+				if err := manager.ConfirmRecoveredCleanup(resource.ExecutionID, resource.Ref); err != nil {
+					remaining = append(remaining, resource)
+				}
+			}
+			resources = remaining
+		}
+	}
 }
 
 const dockerInstanceFile = ".docker-instance-id"

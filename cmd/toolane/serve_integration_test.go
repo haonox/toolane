@@ -144,7 +144,7 @@ func TestDockerHTTPServiceRecoversAndRunsSandbox(t *testing.T) {
 		t.Fatalf("startup did not persist Docker instance: bound=%q err=%v", bound, err)
 	}
 	tracked := getServiceExecution(t, client, base, trackedExecution, "docker-http-local-token-12345")
-	if tracked.State != execution.Interrupted || tracked.ErrorCode != "service_restarted" {
+	if tracked.State != execution.Interrupted || tracked.ErrorCode != "service_restarted" || tracked.CleanupStatus != "succeeded" {
 		t.Fatalf("tracked recovery: %+v", tracked)
 	}
 	request, err := http.NewRequest(http.MethodPost, base+"/api/v1/executions",

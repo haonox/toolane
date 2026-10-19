@@ -426,6 +426,7 @@ func TestDurableResourceOwnershipPersistsAndReachesRecovery(t *testing.T) {
 		if len(resources) != 1 || resources[0].ExecutionID != initial.ID || resources[0].Ref != ref {
 			return errors.New("recovery did not receive the persisted resource")
 		}
+		resources[0].AbsentConfirmed = true
 		recovered = true
 		return nil
 	})
@@ -434,6 +435,10 @@ func TestDurableResourceOwnershipPersistsAndReachesRecovery(t *testing.T) {
 	}
 	if !recovered {
 		t.Fatal("resource recovery hook was not called")
+	}
+	cleaned, err := m.Get(initial.ID)
+	if err != nil || cleaned.CleanupStatus != "succeeded" || cleaned.CleanupError != "" {
+		t.Fatalf("confirmed absence did not reconcile cleanup: %+v err=%v", cleaned, err)
 	}
 	closeDurableManager(t, m)
 }
@@ -524,6 +529,7 @@ func TestDurableRecoveryFailureDoesNotInterruptOwnedResource(t *testing.T) {
 		if len(resources) != 1 || resources[0].Ref != ref {
 			return errors.New("lost persisted resource during recovery")
 		}
+		resources[0].AbsentConfirmed = true
 		return errors.New("Docker stop not confirmed")
 	}); err == nil {
 		t.Fatal("manager started despite failed resource recovery")
@@ -537,8 +543,21 @@ func TestDurableRecoveryFailureDoesNotInterruptOwnedResource(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot, err := m.Get("claimed")
-	if err != nil || snapshot.State != Interrupted || calls.Load() != 0 {
+	if err != nil || snapshot.State != Interrupted || snapshot.CleanupStatus != "pending" || calls.Load() != 0 {
 		t.Fatalf("confirmed recovery did not interrupt without rerun: %+v calls=%d err=%v", snapshot, calls.Load(), err)
+	}
+	if err := m.ConfirmRecoveredCleanup("claimed", tool.ResourceRef{Kind: ref.Kind, ID: "wrong", InstanceID: ref.InstanceID}); err == nil {
+		t.Fatal("mismatched resource marked cleaned")
+	}
+	if err := m.ConfirmRecoveredCleanup("claimed", ref); err != nil {
+		t.Fatalf("late absence confirmation: %v", err)
+	}
+	if err := m.ConfirmRecoveredCleanup("claimed", ref); err != nil {
+		t.Fatalf("duplicate absence confirmation: %v", err)
+	}
+	snapshot, err = m.Get("claimed")
+	if err != nil || snapshot.CleanupStatus != "succeeded" {
+		t.Fatalf("late cleanup not visible: %+v err=%v", snapshot, err)
 	}
 	closeDurableManager(t, m)
 }
