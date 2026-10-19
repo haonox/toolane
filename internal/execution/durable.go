@@ -84,6 +84,16 @@ func NewDurableManager(ctx context.Context, config Config, registry *tool.Regist
 	if err := recoverResources(ctx, resources); err != nil {
 		return nil, fmt.Errorf("recover owned resources: %w", err)
 	}
+	_, err = store.Prune(ctx, sqlite.RetentionPolicy{MaxRecords: config.DurableRecordLimit, MaxAge: config.DurableRetention, Now: time.Now().UTC()})
+	if err != nil && !errors.Is(err, sqlite.ErrRetentionCapacity) {
+		return nil, fmt.Errorf("prune durable records before recovery: %w", err)
+	}
+	// Pruning follows resource recovery, so reconstruct from the rows that
+	// still exist rather than the earlier recovery scan.
+	rows, err = store.ListExecutions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list executions after pruning: %w", err)
+	}
 	workflows, err := store.ListWorkflows(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list workflows before recovery: %w", err)
@@ -99,6 +109,74 @@ func NewDurableManager(ctx context.Context, config Config, registry *tool.Regist
 	claimed = false
 	m.startWorkers()
 	return m, nil
+}
+
+// pruneDurableLocked runs under the manager lock so an admission cannot race
+// with pruning and cached terminal snapshots remain consistent with SQLite.
+func (m *Manager) pruneDurableLocked(reserve int) error {
+	if reserve > m.config.DurableRecordLimit {
+		return sqlite.ErrRetentionCapacity
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if reserve > 0 {
+		count, err := m.store.CountExecutions(ctx)
+		if err != nil {
+			m.haltStoreLocked(err)
+			return err
+		}
+		if count <= m.config.DurableRecordLimit-reserve {
+			return nil
+		}
+	}
+	result, err := m.store.Prune(ctx, sqlite.RetentionPolicy{
+		MaxRecords: m.config.DurableRecordLimit,
+		MaxAge:     m.config.DurableRetention,
+		Reserve:    reserve,
+		Now:        time.Now().UTC(),
+	})
+	if len(result.ExecutionIDs) > 0 {
+		deleted := make(map[string]bool, len(result.ExecutionIDs))
+		for _, id := range result.ExecutionIDs {
+			deleted[id] = true
+			delete(m.records, id)
+		}
+		kept := m.terminal[:0]
+		for _, group := range m.terminal {
+			if len(group.ids) > 0 && deleted[group.ids[0]] {
+				m.terminalCount -= len(group.ids)
+				continue
+			}
+			kept = append(kept, group)
+		}
+		clear(m.terminal[len(kept):])
+		m.terminal = kept
+	}
+	for _, id := range result.WorkflowIDs {
+		delete(m.workflows, id)
+	}
+	if err != nil && !errors.Is(err, sqlite.ErrRetentionCapacity) {
+		m.haltStoreLocked(err)
+	}
+	return err
+}
+
+func (m *Manager) prunePeriodically() {
+	defer m.workers.Done()
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.stop:
+			return
+		case <-ticker.C:
+			m.mu.Lock()
+			if !m.closing && !m.halted {
+				_ = m.pruneDurableLocked(0)
+			}
+			m.mu.Unlock()
+		}
+	}
 }
 
 func encodeNormalizedRequest(p preparedRequest) ([]byte, error) {

@@ -75,6 +75,8 @@ type Config struct {
 	MaxTenantIDBytes         int
 	Scheduler                SchedulerMode
 	RetainedResults          int
+	DurableRecordLimit       int
+	DurableRetention         time.Duration
 	MaxWorkflowNodes         int
 	MaxWorkflowBytes         int
 	DefaultQueueTimeout      time.Duration
@@ -102,6 +104,8 @@ func DefaultConfig() Config {
 		MaxTenantIDBytes:         256,
 		Scheduler:                SchedulerRoundRobin,
 		RetainedResults:          1000,
+		DurableRecordLimit:       10000,
+		DurableRetention:         7 * 24 * time.Hour,
 		MaxWorkflowNodes:         64,
 		MaxWorkflowBytes:         256 * 1024,
 		DefaultQueueTimeout:      30 * time.Second,
@@ -121,7 +125,7 @@ func DefaultConfig() Config {
 }
 
 func (c Config) validate() error {
-	if c.Workers <= 0 || c.QueueCapacity <= 0 || c.TenantRunningLimit <= 0 || c.TenantPendingLimit <= 0 || c.MaxTenantIDBytes <= 0 || c.RetainedResults <= 0 || c.MaxWorkflowNodes <= 0 || c.MaxWorkflowBytes <= 0 || c.MaxResultBytes <= 0 || c.MaxArgumentBytes <= 0 || c.MaxOutputBytes <= 0 || c.MaxAgentIDBytes <= 0 || c.MaxErrorMessageBytes <= 0 {
+	if c.Workers <= 0 || c.QueueCapacity <= 0 || c.TenantRunningLimit <= 0 || c.TenantPendingLimit <= 0 || c.MaxTenantIDBytes <= 0 || c.RetainedResults <= 0 || c.DurableRecordLimit <= 0 || c.DurableRetention <= 0 || c.MaxWorkflowNodes <= 0 || c.MaxWorkflowBytes <= 0 || c.MaxResultBytes <= 0 || c.MaxArgumentBytes <= 0 || c.MaxOutputBytes <= 0 || c.MaxAgentIDBytes <= 0 || c.MaxErrorMessageBytes <= 0 {
 		return errors.New("workers, global and tenant capacities, retained results and byte limits must be positive")
 	}
 	if c.SandboxMaxCPUMilli <= 0 || c.SandboxMaxMemoryBytes <= 0 || c.SandboxCPUBudgetMilli < c.SandboxMaxCPUMilli || c.SandboxMemoryBudgetBytes < c.SandboxMaxMemoryBytes {
@@ -290,11 +294,18 @@ func newManager(config Config, registry *tool.Registry, store *sqlite.Store) (*M
 
 func (m *Manager) startWorkers() {
 	config := m.config
-	m.workers.Add(config.Workers + 1)
+	count := config.Workers + 1
+	if m.store != nil {
+		count++
+	}
+	m.workers.Add(count)
 	for range config.Workers {
 		go m.worker()
 	}
 	go m.expireQueued()
+	if m.store != nil {
+		go m.prunePeriodically()
+	}
 	go func() {
 		m.workers.Wait()
 		close(m.done)
@@ -354,6 +365,11 @@ func (m *Manager) submit(ctx context.Context, req Request, key string) (Snapshot
 	}
 	if state := m.tenants[prepared.request.TenantID]; state != nil && state.pending >= m.config.TenantPendingLimit {
 		return Snapshot{}, ErrTenantQueueFull
+	}
+	if m.store != nil {
+		if err := m.pruneDurableLocked(1); err != nil {
+			return Snapshot{}, err
+		}
 	}
 	now := time.Now().UTC()
 	r := prepared.makeRecord(id, "", "", now, true)
