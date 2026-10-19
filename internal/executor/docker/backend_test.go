@@ -124,26 +124,26 @@ func TestConfirmRecoveredResourceChecksPersistedID(t *testing.T) {
 	f := &recoveryCLI{containers: map[string]containerInfo{id: info}}
 	b := newBackend(s, f)
 	ref := tool.ResourceRef{Kind: tool.ResourceDockerContainer, ID: id, InstanceID: s.InstanceID}
-	if err := b.ConfirmRecoveredResource(context.Background(), testExecutionID, ref); err != nil {
-		t.Fatalf("stopped owned container rejected: %v", err)
+	if absent, err := b.ConfirmRecoveredResource(context.Background(), testExecutionID, ref); err != nil || absent {
+		t.Fatalf("stopped owned container result: absent=%v err=%v", absent, err)
 	}
 	info.Config.Labels["toolane.instance"] = "other"
 	f.containers[id] = info
-	if err := b.ConfirmRecoveredResource(context.Background(), testExecutionID, ref); err == nil {
+	if _, err := b.ConfirmRecoveredResource(context.Background(), testExecutionID, ref); err == nil {
 		t.Fatal("persisted ID with changed ownership labels accepted")
 	}
 	info.Config.Labels["toolane.instance"] = s.InstanceID
 	info.State.Running = true
 	f.containers[id] = info
-	if err := b.ConfirmRecoveredResource(context.Background(), testExecutionID, ref); err == nil {
+	if _, err := b.ConfirmRecoveredResource(context.Background(), testExecutionID, ref); err == nil {
 		t.Fatal("running persisted container accepted")
 	}
 	delete(f.containers, id)
-	if err := b.ConfirmRecoveredResource(context.Background(), testExecutionID, ref); err != nil {
-		t.Fatalf("absent persisted container rejected: %v", err)
+	if absent, err := b.ConfirmRecoveredResource(context.Background(), testExecutionID, ref); err != nil || !absent {
+		t.Fatalf("absent persisted container result: absent=%v err=%v", absent, err)
 	}
 	ref.InstanceID = "other"
-	if err := b.ConfirmRecoveredResource(context.Background(), testExecutionID, ref); err == nil {
+	if _, err := b.ConfirmRecoveredResource(context.Background(), testExecutionID, ref); err == nil {
 		t.Fatal("foreign instance reference accepted")
 	}
 }

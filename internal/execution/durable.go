@@ -38,6 +38,9 @@ type storedRecord struct {
 type RecoveryResource struct {
 	ExecutionID string
 	Ref         tool.ResourceRef
+	// AbsentConfirmed is set by the recovery callback only after the owned
+	// resource is verified absent. A stopped but retained container stays false.
+	AbsentConfirmed bool
 }
 
 type normalizedRequest struct {
@@ -92,6 +95,9 @@ func NewDurableManager(ctx context.Context, config Config, registry *tool.Regist
 	if err := recoverResources(ctx, resources); err != nil {
 		return nil, fmt.Errorf("recover owned resources: %w", err)
 	}
+	if err := reconcileRecoveredCleanup(ctx, store, resources); err != nil {
+		return nil, fmt.Errorf("reconcile recovered cleanup: %w", err)
+	}
 	_, err = store.Prune(ctx, sqlite.RetentionPolicy{MaxRecords: config.DurableRecordLimit, MaxAge: config.DurableRetention, Now: time.Now().UTC()})
 	if err != nil && !errors.Is(err, sqlite.ErrRetentionCapacity) {
 		return nil, fmt.Errorf("prune durable records before recovery: %w", err)
@@ -117,6 +123,73 @@ func NewDurableManager(ctx context.Context, config Config, registry *tool.Regist
 	claimed = false
 	m.startWorkers()
 	return m, nil
+}
+
+func reconcileRecoveredCleanup(ctx context.Context, store *sqlite.Store, resources []RecoveryResource) error {
+	for _, resource := range resources {
+		if !resource.AbsentConfirmed {
+			continue
+		}
+		row, err := store.GetExecution(ctx, resource.ExecutionID)
+		if err != nil {
+			return err
+		}
+		r, err := decodeStoredExecution(row)
+		if err != nil {
+			return err
+		}
+		if r.resource == nil || *r.resource != resource.Ref {
+			return fmt.Errorf("recovered resource for execution %s changed during cleanup", resource.ExecutionID)
+		}
+		if r.snapshot.CleanupStatus == "succeeded" {
+			continue
+		}
+		next := cloneSnapshot(r.snapshot)
+		next.CleanupStatus = "succeeded"
+		next.CleanupError = ""
+		encoded, err := encodeStoredExecution(r, next)
+		if err != nil {
+			return err
+		}
+		at := time.Now().UTC()
+		event, err := stateEvent(next, at)
+		if err != nil {
+			return err
+		}
+		event.Kind = "progress"
+		if _, err := store.Transition(ctx, row.ID, row.Version, string(next.State), encoded, event); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ConfirmRecoveredCleanup records a recovered resource as cleaned after the
+// caller verifies that its persisted container ID is absent. It is safe to
+// retry after a database error or a concurrent confirmation.
+func (m *Manager) ConfirmRecoveredCleanup(executionID string, ref tool.ResourceRef) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.store == nil {
+		return errors.New("recovered cleanup requires a durable manager")
+	}
+	if m.storeError != nil {
+		return m.storeError
+	}
+	r := m.records[executionID]
+	if r == nil {
+		return ErrNotFound
+	}
+	if r.resource == nil || *r.resource != ref || r.snapshot.FinishedAt == nil {
+		return errors.New("recovered cleanup does not match a finished execution resource")
+	}
+	if r.snapshot.CleanupStatus == "succeeded" {
+		return nil
+	}
+	next := cloneSnapshot(r.snapshot)
+	next.CleanupStatus = "succeeded"
+	next.CleanupError = ""
+	return m.applySnapshotKindLocked(r, next, "progress")
 }
 
 // pruneDurableLocked runs under the manager lock so an admission cannot race

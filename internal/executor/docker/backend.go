@@ -187,33 +187,33 @@ func (b *Backend) Check(ctx context.Context) error {
 }
 
 // ConfirmRecoveredResource checks a persisted container ID independently of
-// the label scan. A missing container is safe; an existing one must still
-// belong to this execution and be stopped. This catches changed labels that
-// would otherwise make a persisted resource invisible to Recover.
-func (b *Backend) ConfirmRecoveredResource(ctx context.Context, executionID string, ref tool.ResourceRef) error {
+// the label scan. The bool reports that the container is absent, which is the
+// only condition that permits a durable cleanup record to be finalized. An
+// existing container must still belong to this execution and be stopped.
+func (b *Backend) ConfirmRecoveredResource(ctx context.Context, executionID string, ref tool.ResourceRef) (bool, error) {
 	if !executionIDPattern.MatchString(executionID) || ref.Kind != tool.ResourceDockerContainer ||
 		ref.InstanceID != b.spec.InstanceID || !containerIDPattern.MatchString(ref.ID) {
-		return errors.New("invalid persisted Docker resource ownership")
+		return false, errors.New("invalid persisted Docker resource ownership")
 	}
 	r := &runner{spec: b.spec, cli: b.cli}
 	info, err := r.inspect(ctx, ref.ID)
 	if isNotFound(err) {
-		return nil
+		return true, nil
 	}
 	if err != nil {
-		return fmt.Errorf("inspect persisted sandbox: %w", err)
+		return false, fmt.Errorf("inspect persisted sandbox: %w", err)
 	}
 	name := "toolane-" + b.spec.InstanceID + "-" + executionID
 	if info.ID != ref.ID {
-		return errors.New("persisted sandbox ID does not match inspection")
+		return false, errors.New("persisted sandbox ID does not match inspection")
 	}
 	if err := r.verifyOwnership(info, name, executionID); err != nil {
-		return fmt.Errorf("persisted sandbox ownership: %w", err)
+		return false, fmt.Errorf("persisted sandbox ownership: %w", err)
 	}
 	if info.State.Running {
-		return errors.New("persisted sandbox is still running after recovery")
+		return false, errors.New("persisted sandbox is still running after recovery")
 	}
-	return nil
+	return false, nil
 }
 
 func (b *Backend) schedule(item residual) bool {
