@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/haonox/toolane/internal/store/sqlite"
 )
 
 // WorkflowNode describes one statically parameterized execution and its direct
@@ -47,6 +49,7 @@ type workflow struct {
 	finishedAt *time.Time
 	remaining  int
 	cancelled  bool
+	version    int64
 }
 
 type terminalGroup struct {
@@ -57,9 +60,6 @@ type terminalGroup struct {
 // SubmitWorkflow validates all nodes before atomically accepting the batch.
 // Blocked nodes count toward the same pending capacity as ready nodes.
 func (m *Manager) SubmitWorkflow(ctx context.Context, req WorkflowRequest) (WorkflowSnapshot, error) {
-	if m.store != nil {
-		return WorkflowSnapshot{}, ErrDurableWorkflowPending
-	}
 	dependencies, err := m.validateWorkflow(req)
 	if err != nil {
 		return WorkflowSnapshot{}, err
@@ -112,6 +112,13 @@ func (m *Manager) SubmitWorkflow(ctx context.Context, req WorkflowRequest) (Work
 		for _, parent := range deps {
 			w.nodes[i].dependsOn = append(w.nodes[i].dependsOn, w.nodes[parent])
 			w.nodes[parent].dependents = append(w.nodes[parent].dependents, w.nodes[i])
+		}
+	}
+	if m.store != nil {
+		persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := m.createStoredWorkflowLocked(persistCtx, req, prepared, w); err != nil {
+			return WorkflowSnapshot{}, err
 		}
 	}
 	m.workflows[workflowID] = w
@@ -228,7 +235,19 @@ func (m *Manager) GetWorkflow(id string) (WorkflowSnapshot, error) {
 	defer m.mu.Unlock()
 	w, ok := m.workflows[id]
 	if !ok {
-		return WorkflowSnapshot{}, ErrNotFound
+		if m.store == nil {
+			return WorkflowSnapshot{}, ErrNotFound
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		stored, err := m.store.GetWorkflow(ctx, id)
+		if errors.Is(err, sqlite.ErrWorkflowNotFound) {
+			return WorkflowSnapshot{}, ErrNotFound
+		}
+		if err != nil {
+			return WorkflowSnapshot{}, err
+		}
+		return decodeStoredWorkflowSnapshot(stored)
 	}
 	return snapshotWorkflow(w), nil
 }
@@ -240,24 +259,52 @@ func (m *Manager) CancelWorkflow(id string) (WorkflowSnapshot, error) {
 	w, ok := m.workflows[id]
 	if !ok {
 		m.mu.Unlock()
+		if m.store != nil {
+			snapshot, err := m.GetWorkflow(id)
+			if err == nil && snapshot.FinishedAt != nil {
+				return snapshot, nil
+			}
+			if err != nil {
+				return WorkflowSnapshot{}, err
+			}
+		}
 		return WorkflowSnapshot{}, ErrNotFound
 	}
 	var cancels []context.CancelFunc
+	defer func() {
+		for _, cancel := range cancels {
+			cancel()
+		}
+	}()
 	if w.remaining > 0 && !w.cancelled {
+		if err := m.transitionWorkflowLocked(w, Cancelling, nil); err != nil {
+			m.mu.Unlock()
+			return WorkflowSnapshot{}, err
+		}
 		w.cancelled = true
-		w.state = Cancelling
 		for _, r := range w.nodes {
 			switch r.snapshot.State {
 			case Blocked:
+				if err := m.finishLocked(r, Cancelled, "cancelled", "workflow cancelled before execution"); err != nil {
+					m.mu.Unlock()
+					return WorkflowSnapshot{}, err
+				}
 				m.releasePendingLocked(r)
-				m.finishLocked(r, Cancelled, "cancelled", "workflow cancelled before execution")
 			case Queued:
+				if err := m.finishLocked(r, Cancelled, "cancelled", "workflow cancelled before execution"); err != nil {
+					m.mu.Unlock()
+					return WorkflowSnapshot{}, err
+				}
 				m.removeQueued(r)
 				m.releasePendingLocked(r)
-				m.finishLocked(r, Cancelled, "cancelled", "workflow cancelled before execution")
 			case Running:
-				r.snapshot.State = Cancelling
-				r.snapshot.StopReason = "user_cancelled"
+				next := cloneSnapshot(r.snapshot)
+				next.State = Cancelling
+				next.StopReason = "user_cancelled"
+				if err := m.applySnapshotLocked(r, next); err != nil {
+					m.mu.Unlock()
+					return WorkflowSnapshot{}, err
+				}
 				cancels = append(cancels, r.cancel)
 			}
 		}
@@ -265,9 +312,6 @@ func (m *Manager) CancelWorkflow(id string) (WorkflowSnapshot, error) {
 	}
 	snapshot := snapshotWorkflow(w)
 	m.mu.Unlock()
-	for _, cancel := range cancels {
-		cancel()
-	}
 	return snapshot, nil
 }
 
@@ -283,7 +327,11 @@ func snapshotWorkflow(w *workflow) WorkflowSnapshot {
 	return s
 }
 
-func (m *Manager) workflowNodeFinishedLocked(r *record) {
+func (m *Manager) workflowNodeFinishedLocked(r *record) error {
+	if r.terminalCounted {
+		return nil
+	}
+	r.terminalCounted = true
 	w := r.workflow
 	w.remaining--
 	if !w.cancelled {
@@ -292,8 +340,10 @@ func (m *Manager) workflowNodeFinishedLocked(r *record) {
 				continue
 			}
 			if r.snapshot.State != Succeeded {
+				if err := m.finishLocked(dependent, Skipped, "dependency_failed", "dependency did not succeed"); err != nil {
+					return err
+				}
 				m.releasePendingLocked(dependent)
-				m.finishLocked(dependent, Skipped, "dependency_failed", "dependency did not succeed")
 				continue
 			}
 			ready := true
@@ -305,8 +355,12 @@ func (m *Manager) workflowNodeFinishedLocked(r *record) {
 			}
 			if ready {
 				now := time.Now().UTC()
-				dependent.snapshot.State = Queued
-				dependent.snapshot.ReadyAt = &now
+				next := cloneSnapshot(dependent.snapshot)
+				next.State = Queued
+				next.ReadyAt = &now
+				if err := m.applySnapshotLocked(dependent, next); err != nil {
+					return err
+				}
 				m.queue = append(m.queue, dependent)
 				m.cond.Signal()
 				m.wakeExpiry()
@@ -314,26 +368,29 @@ func (m *Manager) workflowNodeFinishedLocked(r *record) {
 		}
 	}
 	if w.remaining != 0 {
-		return
+		return nil
 	}
+	state := Succeeded
 	if w.cancelled {
-		w.state = Cancelled
+		state = Cancelled
 	} else {
-		w.state = Succeeded
 		for _, node := range w.nodes {
 			if node.snapshot.State != Succeeded {
-				w.state = Failed
+				state = Failed
 				break
 			}
 		}
 	}
 	now := time.Now().UTC()
-	w.finishedAt = &now
+	if err := m.transitionWorkflowLocked(w, state, &now); err != nil {
+		return err
+	}
 	group := terminalGroup{workflowID: w.id, ids: make([]string, len(w.nodes))}
 	for i, node := range w.nodes {
 		group.ids[i] = node.snapshot.ID
 	}
 	m.retainTerminalLocked(group)
+	return nil
 }
 
 func (m *Manager) retainTerminalLocked(group terminalGroup) {

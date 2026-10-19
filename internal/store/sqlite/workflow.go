@@ -148,3 +148,76 @@ func (s *Store) GetWorkflow(ctx context.Context, id string) (Workflow, error) {
 	}
 	return record, nil
 }
+
+// ListWorkflows returns complete batches in admission order for startup
+// reconstruction. Startup holds the runtime claim, so no other manager writes.
+func (s *Store) ListWorkflows(ctx context.Context) ([]Workflow, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM workflows ORDER BY created_at_ns, id`)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	workflows := make([]Workflow, 0, len(ids))
+	for _, id := range ids {
+		workflow, err := s.GetWorkflow(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		workflows = append(workflows, workflow)
+	}
+	return workflows, nil
+}
+
+// TransitionWorkflow updates the summary with version comparison. Node state
+// and event transitions use Transition; startup can reconstruct a summary if
+// the process stops between a node commit and this summary update.
+func (s *Store) TransitionWorkflow(ctx context.Context, id string, expectedVersion int64, state string, finishedAt *time.Time) (int64, error) {
+	if id == "" || expectedVersion < 1 || state == "" {
+		return 0, errors.New("incomplete workflow transition")
+	}
+	var finishedAtNS any
+	if finishedAt != nil {
+		finishedAtNS = finishedAt.UnixNano()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE workflows SET state = ?, finished_at_ns = ?, version = version + 1
+		WHERE id = ? AND version = ?`, state, finishedAtNS, id, expectedVersion)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if affected == 0 {
+		var exists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM workflows WHERE id = ?)`, id).Scan(&exists); err != nil {
+			return 0, err
+		}
+		if !exists {
+			return 0, ErrWorkflowNotFound
+		}
+		return 0, ErrVersionConflict
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return expectedVersion + 1, nil
+}
