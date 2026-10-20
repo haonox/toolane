@@ -14,13 +14,15 @@ Linux · Go 1.27.1 · SQLite · HTTP + SSE · 可选 Docker 沙箱 · [Apache-2.
 
 ```mermaid
 flowchart LR
-    Client[Agent / Client] --> API[HTTP API]
-    API --> Manager[Scheduler & Manager]
-    Manager <--> Store[(SQLite)]
-    Manager --> Executor{Executor}
-    Executor --> Mock[Mock]
-    Executor --> Process[Trusted Process]
-    Executor --> Docker[Docker Sandbox]
+    Client[Agent / Client]:::box --> API[HTTP API]:::box
+    API --> Manager[Scheduler & Manager]:::box
+    Manager <--> Store[(SQLite)]:::box
+    Manager --> Executor{Executor}:::box
+    Executor --> Mock[Mock]:::box
+    Executor --> Process[Trusted Process]:::box
+    Executor --> Docker[Docker Sandbox]:::box
+
+    classDef box fill:#f8f9fa,stroke:#333,stroke-width:1.5px,rounded:false
 ```
 
 ## 快速开始

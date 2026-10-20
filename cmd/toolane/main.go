@@ -55,14 +55,18 @@ func demo(kind string) (retErr error) {
 		def = mock.Definition()
 		args = json.RawMessage(`{"delay_ms":100,"value":"hello from Toolane"}`)
 	case "process":
+		// Look for the "printf" executable in the system's PATH
 		path, err := exec.LookPath("printf")
+		fmt.Printf("using %s for process demo\n", path)
 		if err != nil {
 			return err
 		}
 		path, err = filepath.Abs(path)
+		fmt.Printf("absolute path: %s\n", path)
 		if err != nil {
 			return err
 		}
+		// Define a trusted process tool that runs the "printf" command with a JSON argument
 		def, err = process.TrustedDefinition("process.printf", process.Spec{
 			Trusted:    true,
 			Executable: path,
@@ -83,14 +87,17 @@ func demo(kind string) (retErr error) {
 	default:
 		return fmt.Errorf("unknown demo %q (choose mock or process)", kind)
 	}
+	// Register the tool definition in the registry
 	if err := registry.Register(def); err != nil {
 		return err
 	}
+	// Create an execution manager with the default configuration and the registry
 	manager, err := execution.NewManager(execution.DefaultConfig(), registry)
 	if err != nil {
 		return err
 	}
 	defer func() { retErr = errors.Join(retErr, manager.Close(context.Background())) }()
+	// Submit an execution request for the tool with the specified arguments
 	initial, err := manager.Submit(context.Background(), execution.Request{
 		Tool:      def.Name,
 		AgentID:   "demo-agent",
