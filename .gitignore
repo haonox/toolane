@@ -1,7 +1,6 @@
 # Build outputs
 /bin/
 /dist/
-/site/
 *.test
 coverage.out
 

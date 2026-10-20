@@ -4,8 +4,6 @@
 
 Linux · Go 1.27.1 · SQLite · HTTP + SSE · 可选 Docker 沙箱 · [Apache-2.0](LICENSE)
 
-[在线源码学习手册](https://haonox.github.io/toolane/)：按执行链路分章节阅读，并配有架构图、时序图和源码索引。
-
 ## 特性
 
 - **有界调度**：固定 Worker、全局和租户容量限制、租户轮询调度、排队超时与取消。
