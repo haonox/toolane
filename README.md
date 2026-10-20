@@ -2,7 +2,7 @@
 
 **面向 Agent 工具调用的单机调度与受限执行服务。** Toolane 接收任务，管理队列、租户配额与 DAG 依赖，通过统一的 Executor 运行工具，并提供持久化的 HTTP 接口。它负责可靠执行；调用方负责决定使用什么工具。
 
-Go 1.27.1 · SQLite · HTTP + SSE · 可选 Docker 沙箱 · [Apache-2.0](LICENSE)
+Linux · Go 1.27.1 · SQLite · HTTP + SSE · 可选 Docker 沙箱 · [Apache-2.0](LICENSE)
 
 ## 特性
 
@@ -25,13 +25,13 @@ flowchart LR
 
 ## 快速开始
 
-需要 **Go 1.27.1**。克隆仓库后，可以先运行不依赖 Docker 的演示：
+需要 **Linux 和 Go 1.27.1**。克隆仓库后，可以先运行不依赖 Docker 的演示：
 
 ```bash
 git clone https://github.com/haonox/toolane.git
 cd toolane
 go run ./cmd/toolane          # Mock 任务
-go run ./cmd/toolane process  # 可信本地进程任务，仅 Linux
+go run ./cmd/toolane process  # 可信本地进程任务
 ```
 
 ### 启动 HTTP 服务
@@ -94,7 +94,7 @@ TOOLANE_TOKEN='replace-with-a-private-random-token' \
 
 ## Docker 执行
 
-Docker 后端仅用于 Linux。服务管理员须先在本机准备镜像，并在配置中固定**镜像标签、SHA-256 digest 和稳定的实例 ID**。以下是可独立使用的 Docker 服务配置，测试镜像为 Alpine 3.24.2：
+使用 Docker 后端时，服务管理员须先在本机准备镜像，并在配置中固定**镜像标签、SHA-256 digest 和稳定的实例 ID**。以下是可独立使用的 Docker 服务配置，测试镜像为 Alpine 3.24.2：
 
 ```json
 {
