@@ -99,6 +99,8 @@ python3 examples/agent_bridge.py invoke --call-id demo-call-1 \
 
 [`agent_bridge.py`](examples/agent_bridge.py) 展示公开描述、提交、等待终态、失败处理，以及模型侧 `call_id` 与 Toolane `execution_id` 的映射。两个租户可用各自 Token 分别运行同一命令。此示例不依赖特定模型 SDK。
 
+用于正确性与故障测试的三个真实 Process 工具、受控本机 HTTP 服务和独立报告账本见 [`tests/fixtures/`](tests/fixtures/README.md)。它们可以通过私有配置生成器单独运行，也会在 Go 端到端测试中通过正式 HTTP 接口执行。
+
 管理员可以在私有服务配置的 `process_tools` 数组中添加工具。每个条目包含公开的 `name`、`description`、`parameters`，以及仅管理员可见的 `executable`、`directory`、`environment`、`args` 和可选的超时/输出上限。`args` 中每项只能是 `{"literal":"固定值"}`、`{"parameter":"必填参数名"}` 或 `{"execution_id":true}`；Toolane 逐项构造参数数组，不经过 Shell。参数绑定只接受 Schema 中必填的字符串、数字或布尔字段。管理员应按目标程序的参数解析规则固定选项及 `--` 分隔符，避免把调用方的数据解释为程序选项。
 
 当前静态配置支持明确限定的 JSON Schema 子集：`object`、`array`、`string`、`integer`、`number`、`boolean`、`null`，以及 `properties`、`required`、`items`、`minimum`、`maximum`、`minLength`、`maxLength`。对象必须显式写 `"additionalProperties": false`；不支持的关键字会使服务启动失败。公开描述和提交校验使用同一份 Schema。配置的 Process 工具成功退出时，标准输出必须且只能包含一个 JSON 值，它会成为任务的 `result`；标准错误可用于诊断。无效 JSON、非零退出、超时与输出超限都有可查询的失败状态。
@@ -155,6 +157,7 @@ go test ./...
 go test -race ./...
 go vet ./...
 python3 -m unittest discover -s examples -p 'test_*.py'
+python3 -m unittest discover -s tests/fixtures -p 'test_*.py'
 ```
 
 真实 Docker 集成测试需要本地 daemon 权限和已拉取的固定镜像：

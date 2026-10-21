@@ -1,0 +1,30 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-and-real-process:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Go tests, including real Process HTTP fixtures
+        run: go test ./... -count=1
+      - name: Go vet
+        run: go vet ./...
+      - name: Python example and fixture tests
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python3 -m unittest discover -s examples -p 'test_*.py'
+          python3 -m unittest discover -s tests/fixtures -p 'test_*.py'
