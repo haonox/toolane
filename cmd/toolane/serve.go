@@ -28,13 +28,14 @@ import (
 )
 
 type serverConfig struct {
-	Listen         string              `json:"listen"`
-	StateDir       string              `json:"state_dir"`
-	Tokens         []httpapi.Token     `json:"tokens"`
-	SSETenantLimit int                 `json:"sse_tenant_limit"`
-	SSEGlobalLimit int                 `json:"sse_global_limit"`
-	MetricsListen  string              `json:"metrics_listen,omitempty"`
-	Docker         *serverDockerConfig `json:"docker,omitempty"`
+	Listen         string                    `json:"listen"`
+	StateDir       string                    `json:"state_dir"`
+	Tokens         []httpapi.Token           `json:"tokens"`
+	SSETenantLimit int                       `json:"sse_tenant_limit"`
+	SSEGlobalLimit int                       `json:"sse_global_limit"`
+	MetricsListen  string                    `json:"metrics_listen,omitempty"`
+	Docker         *serverDockerConfig       `json:"docker,omitempty"`
+	ProcessTools   []serverProcessToolConfig `json:"process_tools,omitempty"`
 }
 
 type serverDockerConfig struct {
@@ -129,9 +130,22 @@ func loadServerConfig(path string) (serverConfig, error) {
 	if config.Docker != nil && (config.Docker.ImageTag == "" || config.Docker.ImageDigest == "" || config.Docker.InstanceID == "") {
 		return serverConfig{}, errors.New("Docker image tag, digest and stable instance ID are required")
 	}
+	configured := map[string]bool{mock.Name: true}
+	if config.Docker != nil {
+		configured[sandboxToolName] = true
+	}
+	for _, processConfig := range config.ProcessTools {
+		if configured[processConfig.Name] {
+			return serverConfig{}, fmt.Errorf("duplicate tool name %q", processConfig.Name)
+		}
+		if _, err := processToolDefinition(processConfig); err != nil {
+			return serverConfig{}, err
+		}
+		configured[processConfig.Name] = true
+	}
 	for _, token := range config.Tokens {
 		for _, name := range token.Tools {
-			if name != mock.Name && (name != sandboxToolName || config.Docker == nil) {
+			if !configured[name] {
 				return serverConfig{}, errors.New("token names a tool that is not configured")
 			}
 		}
@@ -153,6 +167,15 @@ func runServerWithLogger(ctx context.Context, configPath string, logger *slog.Lo
 	registry := tool.NewRegistry()
 	if err := registry.Register(mock.Definition()); err != nil {
 		return err
+	}
+	for _, processConfig := range config.ProcessTools {
+		definition, err := processToolDefinition(processConfig)
+		if err != nil {
+			return err
+		}
+		if err := registry.Register(definition); err != nil {
+			return err
+		}
 	}
 	var dockerBackend *docker.Backend
 	if config.Docker != nil {
@@ -263,6 +286,7 @@ func runServerWithLogger(ctx context.Context, configPath string, logger *slog.Lo
 	}
 	api.EnableMetrics(metrics)
 	api.EnableLogger(logger)
+	api.EnableToolCatalog(registry.PublicDefinitions())
 	listener, err := net.Listen("tcp", config.Listen)
 	if err != nil {
 		return err

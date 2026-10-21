@@ -15,19 +15,21 @@ import (
 // Spec is server-owned policy. Args must produce an argument array, never a
 // shell command. A request cannot select the executable, directory or env.
 type Spec struct {
-	Trusted        bool
-	Executable     string
-	Args           func(json.RawMessage) ([]string, error)
-	Directory      string
-	Environment    []string
-	GracePeriod    time.Duration
-	CleanupTimeout time.Duration
+	Trusted         bool
+	Executable      string
+	Args            func(json.RawMessage) ([]string, error)
+	ArgsWithOptions func(json.RawMessage, tool.RunOptions) ([]string, error)
+	JSONStdout      bool
+	Directory       string
+	Environment     []string
+	GracePeriod     time.Duration
+	CleanupTimeout  time.Duration
 }
 
 // TrustedDefinition builds a Process tool after checking its fixed policy.
 // The binary is checked at execution time so start failures remain observable.
 func TrustedDefinition(name string, spec Spec) (tool.Definition, error) {
-	if name == "" || !spec.Trusted || !filepath.IsAbs(spec.Executable) || spec.Args == nil {
+	if name == "" || !spec.Trusted || !filepath.IsAbs(spec.Executable) || (spec.Args == nil && spec.ArgsWithOptions == nil) || (spec.Args != nil && spec.ArgsWithOptions != nil) {
 		return tool.Definition{}, errors.New("process tool requires name, trust flag, absolute executable and argument builder")
 	}
 	if spec.Directory != "" && !filepath.IsAbs(spec.Directory) {
@@ -51,11 +53,18 @@ func TrustedDefinition(name string, spec Spec) (tool.Definition, error) {
 	return tool.Definition{
 		Name: name,
 		Validate: func(raw json.RawMessage) error {
-			_, err := spec.Args(raw)
+			_, err := buildArgs(spec, raw, tool.RunOptions{ExecutionID: "00000000000000000000000000000000"})
 			return err
 		},
 		Execute: func(ctx context.Context, raw json.RawMessage, options tool.RunOptions) (tool.Outcome, error) {
 			return run(ctx, raw, options, spec)
 		},
 	}, nil
+}
+
+func buildArgs(spec Spec, raw json.RawMessage, options tool.RunOptions) ([]string, error) {
+	if spec.ArgsWithOptions != nil {
+		return spec.ArgsWithOptions(raw, options)
+	}
+	return spec.Args(raw)
 }
