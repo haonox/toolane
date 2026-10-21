@@ -21,6 +21,7 @@ import (
 	"github.com/haonox/toolane/internal/execution"
 	"github.com/haonox/toolane/internal/observability"
 	"github.com/haonox/toolane/internal/store/sqlite"
+	"github.com/haonox/toolane/internal/tool"
 )
 
 const maxJSONBytes = 256 * 1024
@@ -55,15 +56,16 @@ func traceOf(r *http.Request) *requestTrace {
 
 // API owns only HTTP transport state; callers own and close the Manager.
 type API struct {
-	manager    *execution.Manager
-	metrics    *observability.Recorder
-	logger     *slog.Logger
-	tokens     map[[32]byte]principal
-	mux        *http.ServeMux
-	sseOptions SSEOptions
-	sseMu      sync.Mutex
-	sseTotal   int
-	sseTenants map[string]int
+	manager     *execution.Manager
+	metrics     *observability.Recorder
+	logger      *slog.Logger
+	tokens      map[[32]byte]principal
+	mux         *http.ServeMux
+	sseOptions  SSEOptions
+	sseMu       sync.Mutex
+	sseTotal    int
+	sseTenants  map[string]int
+	toolCatalog []tool.PublicDefinition
 }
 
 func New(manager *execution.Manager, tokens []Token, options ...SSEOptions) (*API, error) {
@@ -102,6 +104,7 @@ func New(manager *execution.Manager, tokens []Token, options ...SSEOptions) (*AP
 	a.mux.HandleFunc("GET /healthz", a.health)
 	a.mux.HandleFunc("GET /readyz", a.ready)
 	a.mux.HandleFunc("POST /api/v1/executions", a.observeAdmission("execution", a.withPrincipal(a.submitExecution)))
+	a.mux.HandleFunc("GET /api/v1/tools", a.withPrincipal(a.listTools))
 	a.mux.HandleFunc("GET /api/v1/executions/{id}", a.withPrincipal(a.getExecution))
 	a.mux.HandleFunc("GET /api/v1/executions/{id}/events", a.withPrincipal(a.streamExecution))
 	a.mux.HandleFunc("POST /api/v1/executions/{id}/cancel", a.withPrincipal(a.cancelExecution))
@@ -110,7 +113,7 @@ func New(manager *execution.Manager, tokens []Token, options ...SSEOptions) (*AP
 	a.mux.HandleFunc("POST /api/v1/workflows/{id}/cancel", a.withPrincipal(a.cancelWorkflow))
 	for pattern, allowed := range map[string]string{
 		"/healthz": "GET", "/readyz": "GET",
-		"/api/v1/executions": "POST", "/api/v1/executions/{id}": "GET",
+		"/api/v1/executions": "POST", "/api/v1/tools": "GET", "/api/v1/executions/{id}": "GET",
 		"/api/v1/executions/{id}/events": "GET",
 		"/api/v1/executions/{id}/cancel": "POST",
 		"/api/v1/workflows":              "POST", "/api/v1/workflows/{id}": "GET",
@@ -125,6 +128,27 @@ func New(manager *execution.Manager, tokens []Token, options ...SSEOptions) (*AP
 		writeError(w, r, http.StatusNotFound, "not_found", "route not found")
 	})
 	return a, nil
+}
+
+// EnableToolCatalog installs public descriptions before the API starts serving.
+func (a *API) EnableToolCatalog(definitions []tool.PublicDefinition) {
+	a.toolCatalog = make([]tool.PublicDefinition, len(definitions))
+	for i, definition := range definitions {
+		a.toolCatalog[i] = definition
+		a.toolCatalog[i].Parameters = append(json.RawMessage(nil), definition.Parameters...)
+	}
+}
+
+func (a *API) listTools(w http.ResponseWriter, _ *http.Request, p principal) {
+	visible := make([]tool.PublicDefinition, 0, len(a.toolCatalog))
+	for _, definition := range a.toolCatalog {
+		if p.tools[definition.Name] {
+			visible = append(visible, definition)
+		}
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Tools []tool.PublicDefinition `json:"tools"`
+	}{Tools: visible})
 }
 
 // EnableMetrics attaches a process-local recorder before ServeHTTP is used.

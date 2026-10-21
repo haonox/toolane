@@ -1,6 +1,7 @@
 package process
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,7 +17,7 @@ func run(ctx context.Context, raw json.RawMessage, options tool.RunOptions, spec
 	if err := ctx.Err(); err != nil {
 		return tool.Outcome{}, err
 	}
-	args, err := spec.Args(raw)
+	args, err := buildArgs(spec, raw, options)
 	if err != nil {
 		return tool.Outcome{}, &tool.RunError{Code: "invalid_arguments", Err: err}
 	}
@@ -87,6 +88,13 @@ func run(ctx context.Context, raw json.RawMessage, options tool.RunOptions, spec
 		return outcome, err
 	}
 	if waitErr == nil {
+		if spec.JSONStdout {
+			result := bytes.TrimSpace([]byte(outcome.Stdout))
+			if len(result) == 0 || !json.Valid(result) {
+				return outcome, &tool.RunError{Code: "invalid_result", Err: errors.New("process stdout must contain one JSON value")}
+			}
+			outcome.Result = append(json.RawMessage(nil), result...)
+		}
 		return outcome, nil
 	}
 	var exitErr *exec.ExitError

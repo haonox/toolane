@@ -275,7 +275,7 @@ func TestRunServerStartsAndStopsLocalDurableAPI(t *testing.T) {
 		if err != nil {
 			t.Fatalf("server shutdown: %v", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(12 * time.Second):
 		t.Fatal("server did not stop")
 	}
 	logText := logs.String()

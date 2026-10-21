@@ -107,6 +107,16 @@ class ToolaneClient:
             "arguments": {"delay_ms": delay_ms, "value": value},
         }, idempotency_key)
 
+    def list_tools(self):
+        return self.request("GET", "/api/v1/tools")
+
+    def submit_tool(self, name, arguments, idempotency_key=None):
+        if not isinstance(name, str) or not name or not isinstance(arguments, dict):
+            raise ValueError("tool name and JSON object arguments are required")
+        return self.request("POST", "/api/v1/executions", {
+            "agent_id": "python-example", "tool": name, "arguments": arguments,
+        }, idempotency_key)
+
     def get_execution(self, execution_id):
         return self.request("GET", execution_path(execution_id))
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
@@ -118,11 +119,20 @@ func (p Policy) validate() error {
 // Execute must return only after its work has stopped when its context is
 // cancelled.
 type Definition struct {
-	Name      string
-	Policy    Policy
-	Resources Resources
-	Validate  func(json.RawMessage) error
-	Execute   func(context.Context, json.RawMessage, RunOptions) (Outcome, error)
+	Name        string
+	Description string
+	Parameters  json.RawMessage
+	Policy      Policy
+	Resources   Resources
+	Validate    func(json.RawMessage) error
+	Execute     func(context.Context, json.RawMessage, RunOptions) (Outcome, error)
+}
+
+// PublicDefinition contains only the fields an Agent may see.
+type PublicDefinition struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
 }
 
 // Registry stores explicit tool registrations. A Manager takes a snapshot of
@@ -172,4 +182,22 @@ func (r *Registry) Snapshot() map[string]Definition {
 		copyOf[name] = def
 	}
 	return copyOf
+}
+
+// PublicDefinitions returns descriptions for tools with a public schema.
+func (r *Registry) PublicDefinitions() []PublicDefinition {
+	definitions := r.Snapshot()
+	names := make([]string, 0, len(definitions))
+	for name, def := range definitions {
+		if def.Description != "" && len(def.Parameters) > 0 {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	result := make([]PublicDefinition, 0, len(names))
+	for _, name := range names {
+		def := definitions[name]
+		result = append(result, PublicDefinition{Name: name, Description: def.Description, Parameters: append(json.RawMessage(nil), def.Parameters...)})
+	}
+	return result
 }
