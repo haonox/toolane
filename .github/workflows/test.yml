@@ -28,3 +28,30 @@ jobs:
         run: |
           python3 -m unittest discover -s examples -p 'test_*.py'
           python3 -m unittest discover -s tests/fixtures -p 'test_*.py'
+          python3 -m unittest discover -s benchmarks -p 'test_*.py'
+      - name: Real Process HTTP smoke experiment
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          go build -o "$RUNNER_TEMP/toolane" ./cmd/toolane
+          python3 benchmarks/run_real_tools.py --binary "$RUNNER_TEMP/toolane" \
+            --out "$RUNNER_TEMP/toolane-real-smoke" --profile smoke
+          test -s "$RUNNER_TEMP/toolane-real-smoke/REPORT.md"
+          test -s "$RUNNER_TEMP/toolane-real-smoke/manifest.json"
+      - name: Real Process short performance regression matrix
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python3 benchmarks/run_real_tools.py --binary "$RUNNER_TEMP/toolane" \
+            --out "$RUNNER_TEMP/toolane-real-short" --profile short --repetitions 1
+          test -s "$RUNNER_TEMP/toolane-real-short/REPORT.md"
+          test -s "$RUNNER_TEMP/toolane-real-short/manifest.json"
+      - name: Preserve experiment records
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: real-process-experiments
+          path: |
+            ${{ runner.temp }}/toolane-real-smoke
+            ${{ runner.temp }}/toolane-real-short
+          if-no-files-found: warn

@@ -210,6 +210,10 @@ func TestRealProcessFixturesThroughHTTP(t *testing.T) {
 		if result["totals"].(map[string]any)["A"] != float64(48) || result["totals"].(map[string]any)["B"] != float64(48) || result["totals"].(map[string]any)["C"] != float64(48) {
 			t.Fatalf("wrong per-tenant totals: %+v", result)
 		}
+		status, events := processRequest(t, client, http.MethodGet, base+"/api/v1/executions/"+accepted.ID+"/events", token, "", "")
+		if status != http.StatusOK || !strings.Contains(string(events), "event: end\n") || !strings.Contains(string(events), `"status":"succeeded"`) {
+			t.Fatalf("real tool terminal SSE missing: status=%d events=%s", status, events)
+		}
 		other := fixtureTokenB
 		if token == fixtureTokenB {
 			other = fixtureTokenA
@@ -237,6 +241,30 @@ func TestRealProcessFixturesThroughHTTP(t *testing.T) {
 	timedFinal := awaitProcessSnapshot(t, client, base, fixtureTokenB, timed.ID, func(s execution.Snapshot) bool { return s.FinishedAt != nil })
 	if timedFinal.State != execution.TimedOut {
 		t.Fatalf("HTTP timeout not propagated: %+v", timedFinal)
+	}
+	limited := processSubmit(t, client, base, fixtureTokenB, `{"tool":"data.summarize","arguments":{"repetitions":1},"output_limit_bytes":16}`, "")
+	limitedFinal := awaitProcessSnapshot(t, client, base, fixtureTokenB, limited.ID, func(s execution.Snapshot) bool { return s.FinishedAt != nil })
+	if limitedFinal.State != execution.Failed || limitedFinal.ErrorCode != "output_limit_exceeded" || !limitedFinal.OutputTruncated {
+		t.Fatalf("real tool output limit not enforced: %+v", limitedFinal)
+	}
+	blockers := make([]execution.Snapshot, 2)
+	for i := range blockers {
+		blockers[i] = processSubmit(t, client, base, fixtureTokenB, `{"tool":"service.query","arguments":{"delay_ms":1000,"status":200}}`, "")
+	}
+	for _, blocker := range blockers {
+		awaitProcessSnapshot(t, client, base, fixtureTokenB, blocker.ID, func(s execution.Snapshot) bool { return s.ProcessStartedAt != nil })
+	}
+	queued := processSubmit(t, client, base, fixtureTokenB, `{"tool":"data.summarize","arguments":{"repetitions":1},"queue_timeout_ms":100}`, "")
+	queuedFinal := awaitProcessSnapshot(t, client, base, fixtureTokenB, queued.ID, func(s execution.Snapshot) bool { return s.FinishedAt != nil })
+	if queuedFinal.State != execution.TimedOut || queuedFinal.ErrorCode != "queue_timeout" || queuedFinal.ProcessStartedAt != nil {
+		t.Fatalf("queued real tool did not time out before launch: %+v", queuedFinal)
+	}
+	for _, blocker := range blockers {
+		status, raw = processRequest(t, client, http.MethodPost, base+"/api/v1/executions/"+blocker.ID+"/cancel", fixtureTokenB, "", "")
+		if status != http.StatusOK && status != http.StatusAccepted {
+			t.Fatalf("cancel query blocker: %d %s", status, raw)
+		}
+		awaitProcessSnapshot(t, client, base, fixtureTokenB, blocker.ID, func(s execution.Snapshot) bool { return s.FinishedAt != nil })
 	}
 
 	status, raw = processRequest(t, client, http.MethodPost, base+"/api/v1/executions", fixtureTokenB, `{"tool":"report.generate","arguments":{"duration_ms":1000,"label":"denied"}}`, "")
@@ -388,18 +416,28 @@ func TestRealReportCrashReconcilesIndependentLedger(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	accepted := processSubmit(t, client, base, fixtureTokenA, `{"tool":"report.generate","arguments":{"duration_ms":3000,"label":"after-crash"}}`, "")
-	readyPath := filepath.Join(outputDir, accepted.ID+".started")
-	awaitFixtureFile(t, readyPath)
-	ready, err := os.ReadFile(readyPath)
-	if err != nil {
-		t.Fatal(err)
+	reports := make([]execution.Snapshot, 2)
+	for i := range reports {
+		body := fmt.Sprintf(`{"tool":"report.generate","arguments":{"duration_ms":3000,"label":"after-crash-%d"}}`, i+1)
+		reports[i] = processSubmit(t, client, base, fixtureTokenA, body, "")
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(ready)))
-	if err != nil || pid <= 0 {
-		t.Fatalf("invalid report process marker %q: %v", ready, err)
+	for _, report := range reports {
+		readyPath := filepath.Join(outputDir, report.ID+".started")
+		awaitFixtureFile(t, readyPath)
+		ready, err := os.ReadFile(readyPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(ready)))
+		if err != nil || pid <= 0 {
+			t.Fatalf("invalid report process marker %q: %v", ready, err)
+		}
+		t.Cleanup(func() { _ = syscall.Kill(-pid, syscall.SIGKILL) })
 	}
-	t.Cleanup(func() { _ = syscall.Kill(-pid, syscall.SIGKILL) })
+	queued := processSubmit(t, client, base, fixtureTokenA, `{"tool":"data.summarize","arguments":{"repetitions":1}}`, "")
+	if before := processSnapshot(t, client, base, fixtureTokenA, queued.ID); before.State != execution.Queued || before.ProcessStartedAt != nil {
+		t.Fatalf("recovery candidate was already claimed: %+v", before)
+	}
 	if err := child.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
@@ -410,30 +448,43 @@ func TestRealReportCrashReconcilesIndependentLedger(t *testing.T) {
 	}
 	restartedBase, restartedClient, stop := startProcessTestServer(t, configPath, address)
 	t.Cleanup(stop)
-	recovered := processSnapshot(t, restartedClient, restartedBase, fixtureTokenA, accepted.ID)
-	if recovered.State != execution.Interrupted || recovered.ErrorCode != "service_restarted" || recovered.Result != nil {
-		t.Fatalf("crashed report was treated as a known result: %+v", recovered)
+	for _, report := range reports {
+		recovered := processSnapshot(t, restartedClient, restartedBase, fixtureTokenA, report.ID)
+		if recovered.State != execution.Interrupted || recovered.ErrorCode != "service_restarted" || recovered.Result != nil {
+			t.Fatalf("crashed report was treated as a known result: %+v", recovered)
+		}
 	}
+	fixtureResult(t, awaitProcessSnapshot(t, restartedClient, restartedBase, fixtureTokenA, queued.ID, func(s execution.Snapshot) bool { return s.FinishedAt != nil }))
 	deadline = time.Now().Add(5 * time.Second)
 	for {
-		if _, err := os.Stat(filepath.Join(outputDir, accepted.ID+".json")); err == nil && len(fixtureLedger(t, outputDir)) == 1 {
+		if len(fixtureLedger(t, outputDir)) == len(reports) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("crashed report did not leave expected independent side effect: %s", accepted.ID)
+			t.Fatalf("crashed reports did not leave expected independent side effects: %+v", reports)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	reportBytes, err := os.ReadFile(filepath.Join(outputDir, accepted.ID+".json"))
-	if err != nil {
-		t.Fatal(err)
+	records := fixtureLedger(t, outputDir)
+	byID := map[string]map[string]string{}
+	for _, record := range records {
+		if byID[record["execution_id"]] != nil {
+			t.Fatalf("duplicate crashed report side effect: %+v", record)
+		}
+		byID[record["execution_id"]] = record
 	}
-	digest := sha256.Sum256(reportBytes)
-	record := fixtureLedger(t, outputDir)[0]
-	if record["execution_id"] != accepted.ID || record["label"] != "after-crash" || record["report_sha256"] != hex.EncodeToString(digest[:]) {
-		t.Fatalf("crashed report and ledger disagree: %+v", record)
-	}
-	if after := processSnapshot(t, restartedClient, restartedBase, fixtureTokenA, accepted.ID); after.State != execution.Interrupted || after.Result != nil {
-		t.Fatalf("late side effect changed unknown outcome: %+v", after)
+	for i, report := range reports {
+		reportBytes, err := os.ReadFile(filepath.Join(outputDir, report.ID+".json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(reportBytes)
+		record := byID[report.ID]
+		if record == nil || record["label"] != fmt.Sprintf("after-crash-%d", i+1) || record["report_sha256"] != hex.EncodeToString(digest[:]) {
+			t.Fatalf("crashed report and ledger disagree: %+v", record)
+		}
+		if after := processSnapshot(t, restartedClient, restartedBase, fixtureTokenA, report.ID); after.State != execution.Interrupted || after.Result != nil {
+			t.Fatalf("late side effect changed unknown outcome: %+v", after)
+		}
 	}
 }
