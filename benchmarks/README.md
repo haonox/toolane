@@ -5,7 +5,7 @@ HTTP and SQLite path. It starts a new Toolane service, private state directory,
 three tenant credentials, two simulated Agents per tenant, and a controlled
 loopback query service for **each** short scenario and repetition. It never
 stores credentials in the output. Linux and Python 3 standard library are
-required; Docker is not used.
+required.
 
 Each run first completes six unmeasured warmup calls, one per simulated Agent.
 Their IDs and states are saved in `warmup.json`.
@@ -68,7 +68,6 @@ result only when the command exits successfully; a failed run may leave
 partial diagnostics.
 
 The older `run_http_service.py` and `http_service.py` measure Mock tasks, so
-their throughput must not be compared directly with Process fixtures. The
-removed Docker backend is not part of these measurements. The HTTP service
-currently exposes tenant round robin only; a FIFO comparison must use the
+their throughput must not be compared directly with Process fixtures. The HTTP
+service currently exposes tenant round robin only; a FIFO comparison must use the
 internal scheduler benchmark and state its different boundary.

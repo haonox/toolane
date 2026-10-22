@@ -147,37 +147,3 @@ func TestWorkflowIdempotencyKeyFailureRollsBackBatch(t *testing.T) {
 		}
 	}
 }
-
-func TestSchemaV3MigratesWithExistingWorkflow(t *testing.T) {
-	ctx := context.Background()
-	dir := filepath.Join(t.TempDir(), "state")
-	s, err := Open(ctx, dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	record := uniqueWorkflowFixture(1)
-	if err := s.CreateWorkflow(ctx, record); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.ExecContext(ctx, "DROP TABLE workflow_idempotency"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.ExecContext(ctx, "PRAGMA user_version = 3"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	s, err = Open(ctx, dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	if got, err := s.GetWorkflow(ctx, record.ID); err != nil || len(got.Nodes) != 2 {
-		t.Fatalf("workflow after v3 migration: %+v err=%v", got, err)
-	}
-	var version int
-	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil || version != schemaVersion {
-		t.Fatalf("migrated version=%d err=%v", version, err)
-	}
-}

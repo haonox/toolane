@@ -195,7 +195,7 @@ def main(argv=None):
         parser.error("output directory must be new or empty")
     args.out.mkdir(parents=True, exist_ok=True)
     clients = {tenant: ToolaneClient(base_url, token) for tenant, token in tokens.items()}
-    metadata = {"generated_at": iso_now(), "experiment": "Mock HTTP service; no Docker",
+    metadata = {"generated_at": iso_now(), "experiment": "Mock HTTP service",
                 "service_url": base_url, "metrics_url": metrics_url, "server_pid": args.server_pid,
                 "python_version": platform.python_version(), "go_version": command_version(["go", "version"]),
                 "platform": platform.platform(), "cpu_count": os.cpu_count(), "cpu_model": cpu_model(),

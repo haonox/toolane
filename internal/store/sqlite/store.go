@@ -58,7 +58,7 @@ type Store struct {
 	runtimeOwned bool
 }
 
-// Open creates or migrates the database and exclusively claims stateDir.
+// Open creates the current database schema or opens it unchanged, and exclusively claims stateDir.
 // A kernel file lock releases automatically if the process crashes.
 func Open(ctx context.Context, stateDir string) (_ *Store, err error) {
 	if stateDir == "" {
@@ -134,13 +134,13 @@ func Open(ctx context.Context, stateDir string) (_ *Store, err error) {
 		}
 	}()
 	db.SetMaxOpenConns(1)
-	if err = migrate(ctx, db); err != nil {
+	if err = initializeSchema(ctx, db); err != nil {
 		return nil, err
 	}
 	return &Store{db: db, lockFile: lockFile}, nil
 }
 
-func migrate(ctx context.Context, db *sql.DB) error {
+func initializeSchema(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -153,97 +153,81 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if version > schemaVersion {
 		return fmt.Errorf("%w: found %d, supported %d", ErrNewerSchema, version, schemaVersion)
 	}
-	if version == 0 {
-		for _, statement := range []string{
-			`CREATE TABLE executions (
-				id TEXT PRIMARY KEY,
-				tenant_id TEXT NOT NULL,
-				state TEXT NOT NULL,
-				snapshot BLOB NOT NULL,
-				request BLOB NOT NULL,
-				created_at_ns INTEGER NOT NULL,
-				version INTEGER NOT NULL CHECK (version > 0)
-			)`,
-			`CREATE INDEX executions_by_tenant ON executions (tenant_id, created_at_ns)`,
-			`CREATE TABLE execution_events (
-				execution_id TEXT NOT NULL REFERENCES executions(id) ON DELETE CASCADE,
-				sequence INTEGER NOT NULL CHECK (sequence > 0),
-				kind TEXT NOT NULL CHECK (length(kind) > 0),
-				payload BLOB NOT NULL,
-				occurred_at_ns INTEGER NOT NULL,
-				PRIMARY KEY (execution_id, sequence)
-			)`,
-			"PRAGMA user_version = 1",
-		} {
-			if _, err := tx.ExecContext(ctx, statement); err != nil {
-				return fmt.Errorf("migrate database: %w", err)
-			}
-		}
+	if version == schemaVersion {
+		return tx.Commit()
 	}
-	if version < 2 {
-		for _, statement := range []string{
-			`CREATE TABLE idempotency (
-				tenant_id TEXT NOT NULL,
-				endpoint TEXT NOT NULL,
-				key TEXT NOT NULL,
-				request_hash BLOB NOT NULL CHECK (length(request_hash) = 32),
-				execution_id TEXT NOT NULL REFERENCES executions(id) ON DELETE RESTRICT,
-				expires_at_ns INTEGER NOT NULL,
-				PRIMARY KEY (tenant_id, endpoint, key)
-			)`,
-			"CREATE INDEX idempotency_by_execution ON idempotency (execution_id)",
-			"PRAGMA user_version = 2",
-		} {
-			if _, err := tx.ExecContext(ctx, statement); err != nil {
-				return fmt.Errorf("migrate database: %w", err)
-			}
-		}
+	if version != 0 {
+		return fmt.Errorf("unsupported database schema version %d; expected %d", version, schemaVersion)
 	}
-	if version < 3 {
-		for _, statement := range []string{
-			`CREATE TABLE workflows (
-				id TEXT PRIMARY KEY,
-				tenant_id TEXT NOT NULL,
-				state TEXT NOT NULL,
-				request BLOB NOT NULL,
-				created_at_ns INTEGER NOT NULL,
-				finished_at_ns INTEGER,
-				version INTEGER NOT NULL CHECK (version > 0)
-			)`,
-			`CREATE INDEX workflows_by_tenant ON workflows (tenant_id, created_at_ns)`,
-			`CREATE TABLE workflow_nodes (
-				workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
-				node_id TEXT NOT NULL,
-				position INTEGER NOT NULL CHECK (position >= 0),
-				depends_on BLOB NOT NULL,
-				execution_id TEXT NOT NULL UNIQUE REFERENCES executions(id) ON DELETE RESTRICT,
-				PRIMARY KEY (workflow_id, node_id),
-				UNIQUE (workflow_id, position)
-			)`,
-			"PRAGMA user_version = 3",
-		} {
-			if _, err := tx.ExecContext(ctx, statement); err != nil {
-				return fmt.Errorf("migrate database: %w", err)
-			}
-		}
+	var existingTables int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`).Scan(&existingTables); err != nil {
+		return err
 	}
-	if version < 4 {
-		for _, statement := range []string{
-			`CREATE TABLE workflow_idempotency (
-				tenant_id TEXT NOT NULL,
-				endpoint TEXT NOT NULL,
-				key TEXT NOT NULL,
-				request_hash BLOB NOT NULL CHECK (length(request_hash) = 32),
-				workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE RESTRICT,
-				expires_at_ns INTEGER NOT NULL,
-				PRIMARY KEY (tenant_id, endpoint, key)
-			)`,
-			"CREATE INDEX workflow_idempotency_by_workflow ON workflow_idempotency (workflow_id)",
-			"PRAGMA user_version = 4",
-		} {
-			if _, err := tx.ExecContext(ctx, statement); err != nil {
-				return fmt.Errorf("migrate database: %w", err)
-			}
+	if existingTables != 0 {
+		return errors.New("unversioned database contains tables")
+	}
+	for _, statement := range []string{
+		`CREATE TABLE executions (
+			id TEXT PRIMARY KEY,
+			tenant_id TEXT NOT NULL,
+			state TEXT NOT NULL,
+			snapshot BLOB NOT NULL,
+			request BLOB NOT NULL,
+			created_at_ns INTEGER NOT NULL,
+			version INTEGER NOT NULL CHECK (version > 0)
+		)`,
+		`CREATE INDEX executions_by_tenant ON executions (tenant_id, created_at_ns)`,
+		`CREATE TABLE execution_events (
+			execution_id TEXT NOT NULL REFERENCES executions(id) ON DELETE CASCADE,
+			sequence INTEGER NOT NULL CHECK (sequence > 0),
+			kind TEXT NOT NULL CHECK (length(kind) > 0),
+			payload BLOB NOT NULL,
+			occurred_at_ns INTEGER NOT NULL,
+			PRIMARY KEY (execution_id, sequence)
+		)`,
+		`CREATE TABLE idempotency (
+			tenant_id TEXT NOT NULL,
+			endpoint TEXT NOT NULL,
+			key TEXT NOT NULL,
+			request_hash BLOB NOT NULL CHECK (length(request_hash) = 32),
+			execution_id TEXT NOT NULL REFERENCES executions(id) ON DELETE RESTRICT,
+			expires_at_ns INTEGER NOT NULL,
+			PRIMARY KEY (tenant_id, endpoint, key)
+		)`,
+		`CREATE INDEX idempotency_by_execution ON idempotency (execution_id)`,
+		`CREATE TABLE workflows (
+			id TEXT PRIMARY KEY,
+			tenant_id TEXT NOT NULL,
+			state TEXT NOT NULL,
+			request BLOB NOT NULL,
+			created_at_ns INTEGER NOT NULL,
+			finished_at_ns INTEGER,
+			version INTEGER NOT NULL CHECK (version > 0)
+		)`,
+		`CREATE INDEX workflows_by_tenant ON workflows (tenant_id, created_at_ns)`,
+		`CREATE TABLE workflow_nodes (
+			workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+			node_id TEXT NOT NULL,
+			position INTEGER NOT NULL CHECK (position >= 0),
+			depends_on BLOB NOT NULL,
+			execution_id TEXT NOT NULL UNIQUE REFERENCES executions(id) ON DELETE RESTRICT,
+			PRIMARY KEY (workflow_id, node_id),
+			UNIQUE (workflow_id, position)
+		)`,
+		`CREATE TABLE workflow_idempotency (
+			tenant_id TEXT NOT NULL,
+			endpoint TEXT NOT NULL,
+			key TEXT NOT NULL,
+			request_hash BLOB NOT NULL CHECK (length(request_hash) = 32),
+			workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE RESTRICT,
+			expires_at_ns INTEGER NOT NULL,
+			PRIMARY KEY (tenant_id, endpoint, key)
+		)`,
+		`CREATE INDEX workflow_idempotency_by_workflow ON workflow_idempotency (workflow_id)`,
+		"PRAGMA user_version = 4",
+	} {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("initialize database: %w", err)
 		}
 	}
 	return tx.Commit()

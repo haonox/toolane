@@ -529,7 +529,7 @@ def report(metadata, summaries):
               "Scheduled submissions record planned and actual send times. `closed_loop` waits for each agent's previous task before submitting the next; it is not an open arrival stream.",
               "Direct baselines have zero HTTP admissions; their elapsed times appear in the direct column. First-24 counts describe execution starts, not completion fairness.",
               "Queue, run and end-to-end times use service timestamps; direct fixture times use the client's monotonic clock. Cross-machine timing comparisons are invalid.",
-              "", "## Coverage limits", "", "- This script tests trusted Process tools through HTTP and SQLite. Toolane no longer has a Docker backend; the script does not measure LLM inference.",
+              "", "## Coverage limits", "", "- This script tests trusted Process tools through HTTP and SQLite; it does not measure LLM inference.",
               "- CPU and RSS samples cover the Toolane server process only; fixture subprocess usage is not included.",
               "- The smoke profile checks wiring only; its rates and percentiles are not capacity evidence.",
               "- This script does not run a FIFO HTTP server comparison because the public service fixes tenant round robin.",

@@ -3,8 +3,10 @@ package sqlite
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -151,25 +153,34 @@ func TestOutputEventBatchIsOrderedAndAtomic(t *testing.T) {
 	}
 }
 
-func TestRejectNewerSchemaWithoutChangingIt(t *testing.T) {
-	ctx := context.Background()
-	dir := filepath.Join(t.TempDir(), "state")
-	s, err := Open(ctx, dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.ExecContext(ctx, "PRAGMA user_version = 5"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Open(ctx, dir); !errors.Is(err, ErrNewerSchema) {
-		t.Fatalf("opening future schema: %v", err)
-	}
-	// A rejected open must release the state lock.
-	if _, err := Open(ctx, dir); !errors.Is(err, ErrNewerSchema) {
-		t.Fatalf("second attempt after rejected open: %v", err)
+func TestRejectUnsupportedSchemaVersionWithoutChangingIt(t *testing.T) {
+	for _, tc := range []struct {
+		version int
+		want    string
+	}{
+		{0, "unversioned database contains tables"},
+		{1, "unsupported database schema version"},
+		{5, "database schema is newer"},
+	} {
+		t.Run(fmt.Sprint(tc.version), func(t *testing.T) {
+			ctx := context.Background()
+			dir := filepath.Join(t.TempDir(), "state")
+			s, err := Open(ctx, dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.db.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", tc.version)); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				if _, err := Open(ctx, dir); err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("open attempt %d: %v", attempt+1, err)
+				}
+			}
+		})
 	}
 }
 

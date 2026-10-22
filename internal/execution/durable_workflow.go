@@ -8,7 +8,7 @@ import (
 )
 
 // recoverWorkflows reconstructs the graph before any worker can claim work.
-// Resource recovery has already confirmed that old running tools are stopped.
+// A tool that was running at the time of a crash still has an unknown result.
 func (m *Manager) recoverWorkflows(stored []sqlite.Workflow) (map[string]bool, error) {
 	claimed := make(map[string]bool)
 	for _, row := range stored {

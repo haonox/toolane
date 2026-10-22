@@ -158,17 +158,11 @@ func runServerWithLogger(ctx context.Context, configPath string, logger *slog.Lo
 			return err
 		}
 	}
-	if err := rejectLegacyDockerState(config.StateDir); err != nil {
-		return err
-	}
 	store, err := sqlite.Open(ctx, config.StateDir)
 	if err != nil {
 		return err
 	}
 	defer func() { retErr = errors.Join(retErr, store.Close()) }()
-	if err := rejectLegacyDockerState(config.StateDir); err != nil {
-		return err
-	}
 	metrics := &observability.Recorder{}
 	transitionEvents := make(chan transitionLog, 1024)
 	transitionDone := make(chan struct{})
@@ -274,17 +268,4 @@ func runServerWithLogger(ctx context.Context, configPath string, logger *slog.Lo
 		retErr = errors.Join(retErr, metricsServer.Shutdown(shutdownCtx))
 	}
 	return retErr
-}
-
-// rejectLegacyDockerState keeps old container ownership records out of a
-// version that no longer has the Docker recovery backend.
-func rejectLegacyDockerState(stateDir string) error {
-	_, err := os.Lstat(filepath.Join(stateDir, ".docker-instance-id"))
-	if err == nil {
-		return errors.New("state directory belongs to the removed Docker backend; resolve owned containers with the previous version and start this version with a new state directory")
-	}
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	return fmt.Errorf("inspect legacy Docker state binding: %w", err)
 }

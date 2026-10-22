@@ -37,7 +37,7 @@ func TestLoadServerConfigRequiresPrivateLoopbackConfiguration(t *testing.T) {
 		strings.Replace(valid, "mock.delay", "process.printf", 1),
 		strings.Replace(valid, `"tokens":`, `"sse_tenant_limit":9,"sse_global_limit":8,"tokens":`, 1),
 		valid + `{}`,
-		strings.Replace(valid, `"tokens":`, `"docker":{},"tokens":`, 1),
+		strings.Replace(valid, `"tokens":`, `"unsupported_option":true,"tokens":`, 1),
 	} {
 		if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
 			t.Fatal(err)
@@ -51,44 +51,6 @@ func TestLoadServerConfigRequiresPrivateLoopbackConfiguration(t *testing.T) {
 	}
 	if _, err := loadServerConfig(path); err == nil {
 		t.Fatal("accepted world-readable token configuration")
-	}
-}
-
-func TestRemovedDockerConfigurationAndStateAreRejected(t *testing.T) {
-	if _, err := processToolDefinition(serverProcessToolConfig{Name: "sandbox.shell"}); err == nil {
-		t.Fatal("removed sandbox.shell name accepted for a Process tool")
-	}
-	dir := t.TempDir()
-	path := filepath.Join(dir, "server.json")
-	stateDir := filepath.Join(dir, "state")
-	if err := os.Mkdir(stateDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	raw := `{"listen":"127.0.0.1:0","state_dir":"` + stateDir + `","docker":{"image_tag":"legacy"},"tokens":[{"token":"private-token-123456","tenant_id":"local","tools":["mock.delay"]}]}`
-	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadServerConfig(path); err == nil {
-		t.Fatal("legacy Docker configuration accepted")
-	}
-	if err := rejectLegacyDockerState(stateDir); err != nil {
-		t.Fatalf("new state directory rejected: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(stateDir, ".docker-instance-id"), []byte("legacy\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := rejectLegacyDockerState(stateDir); err == nil || !strings.Contains(err.Error(), "removed Docker backend") {
-		t.Fatalf("legacy state directory accepted: %v", err)
-	}
-	raw = `{"listen":"127.0.0.1:0","state_dir":"` + stateDir + `","tokens":[{"token":"private-token-123456","tenant_id":"local","tools":["mock.delay"]}]}`
-	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := runServer(context.Background(), path); err == nil || !strings.Contains(err.Error(), "removed Docker backend") {
-		t.Fatalf("service started with legacy state: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(stateDir, "toolane.sqlite")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("legacy state was modified before rejection: %v", err)
 	}
 }
 

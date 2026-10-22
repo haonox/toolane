@@ -18,11 +18,10 @@ const executionEndpoint = "POST /api/v1/executions"
 const workflowEndpoint = "POST /api/v1/workflows"
 
 type storedRecord struct {
-	Snapshot       Snapshot        `json:"snapshot"`
-	Arguments      []byte          `json:"arguments"`
-	Deadline       time.Time       `json:"queue_deadline"`
-	LegacyResource json.RawMessage `json:"resource,omitempty"`
-	Limits         struct {
+	Snapshot  Snapshot  `json:"snapshot"`
+	Arguments []byte    `json:"arguments"`
+	Deadline  time.Time `json:"queue_deadline"`
+	Limits    struct {
 		QueueTimeout       time.Duration `json:"queue_timeout_ns"`
 		ExecutionTimeout   time.Duration `json:"execution_timeout_ns"`
 		OutputLimitBytes   int           `json:"output_limit_bytes"`
@@ -42,11 +41,9 @@ type normalizedRequest struct {
 }
 
 // NewDurableManager reconciles previously accepted work before starting any
-// workers. It rejects state with legacy Docker resources because this version
-// cannot clean up those resources. The caller owns store and closes it after
-// Manager.Close. An optional observer runs
-// synchronously under the Manager lock after each committed transition; it
-// must stay fast and must not call back into Manager.
+// workers. The caller owns store and closes it after Manager.Close. An optional
+// observer runs synchronously under the Manager lock after each committed
+// transition; it must stay fast and must not call back into Manager.
 func NewDurableManager(ctx context.Context, config Config, registry *tool.Registry, store *sqlite.Store, observers ...func(Snapshot, Snapshot)) (*Manager, error) {
 	if store == nil {
 		return nil, errors.New("durable manager requires a store")
@@ -233,8 +230,13 @@ func encodeStoredExecution(r *record, next Snapshot) ([]byte, error) {
 
 func decodeStoredExecution(row sqlite.Execution) (*record, error) {
 	var value storedRecord
-	if err := json.Unmarshal(row.Snapshot, &value); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(row.Snapshot))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&value); err != nil {
 		return nil, fmt.Errorf("decode execution %s: %w", row.ID, err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return nil, fmt.Errorf("execution %s must contain one stored record", row.ID)
 	}
 	s := value.Snapshot
 	if s.ID != row.ID || s.TenantID != row.TenantID || string(s.State) != row.State || !s.CreatedAt.Equal(row.CreatedAt) || value.Deadline.IsZero() || row.Version < 1 {
@@ -245,9 +247,6 @@ func decodeStoredExecution(row sqlite.Execution) (*record, error) {
 	s.OutputLimitBytes = value.Limits.OutputLimitBytes
 	s.ArgumentLimitBytes = value.Limits.ArgumentLimitBytes
 	s.ResultLimitBytes = value.Limits.ResultLimitBytes
-	if len(value.LegacyResource) > 0 && string(value.LegacyResource) != "null" {
-		return nil, fmt.Errorf("execution %s contains a legacy Docker resource; use a new state directory after resolving owned containers", row.ID)
-	}
 	return &record{snapshot: s, arguments: value.Arguments, deadline: value.Deadline, version: row.Version}, nil
 }
 

@@ -46,9 +46,4 @@ func TestRecorderUsesFiniteLabelsAndCommittedTransitionDurations(t *testing.T) {
 	if strings.Contains(output.String(), "tenant-selected-label") {
 		t.Fatal("unbounded label appeared in metrics")
 	}
-	for _, removed := range []string{"toolane_residual_containers", "toolane_residual_blocked", "toolane_reserved_cpu_millicores", "toolane_reserved_memory_bytes"} {
-		if strings.Contains(output.String(), removed) {
-			t.Fatalf("removed Docker metric %q remains", removed)
-		}
-	}
 }

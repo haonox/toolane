@@ -43,9 +43,6 @@ var processToolName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.-]{0,127}$`)
 var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func processToolDefinition(config serverProcessToolConfig) (tool.Definition, error) {
-	if config.Name == "sandbox.shell" {
-		return tool.Definition{}, errors.New("sandbox.shell was removed with the Docker backend and cannot name a Process tool")
-	}
 	if !processToolName.MatchString(config.Name) || strings.TrimSpace(config.Description) == "" || len(config.Description) > 2048 {
 		return tool.Definition{}, errors.New("process tool needs a valid name and description")
 	}

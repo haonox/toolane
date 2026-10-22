@@ -362,7 +362,7 @@ func TestDurableClaimFailureDoesNotRunTool(t *testing.T) {
 	}
 }
 
-func TestDurableRejectsLegacyDockerResourceBeforeRecovery(t *testing.T) {
+func TestDurableRejectsUnknownStoredFieldsBeforeRecovery(t *testing.T) {
 	ctx := context.Background()
 	s := openDurableStore(t, filepath.Join(t.TempDir(), "state"))
 	defer s.Close()
@@ -371,11 +371,11 @@ func TestDurableRejectsLegacyDockerResourceBeforeRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var stored storedRecord
+	var stored map[string]json.RawMessage
 	if err := json.Unmarshal(row.Snapshot, &stored); err != nil {
 		t.Fatal(err)
 	}
-	stored.LegacyResource = json.RawMessage(`{"kind":"docker_container","id":"old-container","instance_id":"legacy"}`)
+	stored["unexpected"] = json.RawMessage(`true`)
 	encoded, err := json.Marshal(stored)
 	if err != nil {
 		t.Fatal(err)
@@ -389,11 +389,11 @@ func TestDurableRejectsLegacyDockerResourceBeforeRecovery(t *testing.T) {
 		calls.Add(1)
 		return tool.Outcome{}, nil
 	})
-	if _, err := NewDurableManager(ctx, DefaultConfig(), registry, s); err == nil || !strings.Contains(err.Error(), "legacy Docker resource") {
-		t.Fatalf("legacy resource accepted: %v", err)
+	if _, err := NewDurableManager(ctx, DefaultConfig(), registry, s); err == nil || !strings.Contains(err.Error(), `unknown field "unexpected"`) {
+		t.Fatalf("unknown stored field accepted: %v", err)
 	}
 	unchanged, err := s.GetExecution(ctx, "claimed")
 	if err != nil || unchanged.State != string(Running) || calls.Load() != 0 {
-		t.Fatalf("legacy recovery changed state or ran work: row=%+v calls=%d err=%v", unchanged, calls.Load(), err)
+		t.Fatalf("rejected recovery changed state or ran work: row=%+v calls=%d err=%v", unchanged, calls.Load(), err)
 	}
 }

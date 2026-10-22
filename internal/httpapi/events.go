@@ -147,7 +147,7 @@ func (a *API) streamExecution(w http.ResponseWriter, r *http.Request, p principa
 		if len(events) == eventReplayBatch {
 			continue
 		}
-		// Older records may finish with a state event instead of "end".
+		// A client can resume after the terminal event has already been sent.
 		latest, err := a.manager.Get(id)
 		if err != nil {
 			return

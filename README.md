@@ -126,10 +126,6 @@ python3 examples/agent_bridge.py invoke --call-id demo-call-1 \
 
 `Idempotency-Key` 用于同一租户请求的重复提交，不保证外部副作用恰好发生一次。服务被强制杀死后，Process 子进程可能继续运行并产生副作用；重启时原任务会显示为 `interrupted`，表示**执行结果未知**。管理员应核查工具进程及其外部副作用后再决定是否重试。正常取消和超时会尝试终止进程组，但可信程序自行脱离进程组时，仍需由管理员处理。
 
-## 旧 Docker 部署迁移
-
-P2 已移除 Docker 后端及 `sandbox.shell`。旧配置中的 `docker` 字段会被拒绝；带有 `.docker-instance-id` 的旧状态目录也会拒绝启动，以免新版遗漏容器清理。迁移步骤和取舍见[设计记录](docs/docker-removal.md)。
-
 ## 开发与验证
 
 ```bash
