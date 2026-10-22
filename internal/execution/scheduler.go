@@ -35,15 +35,11 @@ func (m *Manager) claimSlotLocked(r *record) {
 	m.pending--
 	r.tenant.running++
 	m.running++
-	m.reservedSandboxCPUMilli += r.snapshot.SandboxCPUMilli
-	m.reservedSandboxMemoryBytes += r.snapshot.SandboxMemoryBytes
 }
 
 func (m *Manager) releaseRunningLocked(r *record) {
 	r.tenant.running--
 	m.running--
-	m.reservedSandboxCPUMilli -= r.snapshot.SandboxCPUMilli
-	m.reservedSandboxMemoryBytes -= r.snapshot.SandboxMemoryBytes
 	m.pruneTenantLocked(r.tenant)
 	// A ready tenant that was at its running limit can now be selected.
 	m.cond.Broadcast()
@@ -73,8 +69,7 @@ func (m *Manager) pruneTenantLocked(state *tenantState) {
 
 // takeReadyLocked returns the oldest eligible task under FIFO or the oldest
 // task for the next eligible tenant under round robin. It leaves blocked nodes,
-// tenants at their running limit, and tasks that cannot currently fit the
-// sandbox budget untouched.
+// tenants at their running limit untouched.
 func (m *Manager) takeReadyLocked() *record {
 	if m.config.Scheduler == SchedulerFIFO {
 		for i, r := range m.queue {
@@ -101,9 +96,7 @@ func (m *Manager) takeReadyLocked() *record {
 }
 
 func (m *Manager) canClaimLocked(r *record) bool {
-	return r.tenant.running < m.config.TenantRunningLimit &&
-		r.snapshot.SandboxCPUMilli <= m.config.SandboxCPUBudgetMilli-m.reservedSandboxCPUMilli &&
-		r.snapshot.SandboxMemoryBytes <= m.config.SandboxMemoryBudgetBytes-m.reservedSandboxMemoryBytes
+	return r.tenant.running < m.config.TenantRunningLimit
 }
 
 func (m *Manager) takeQueuedAtLocked(i int) *record {

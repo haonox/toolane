@@ -68,7 +68,7 @@ result only when the command exits successfully; a failed run may leave
 partial diagnostics.
 
 The older `run_http_service.py` and `http_service.py` measure Mock tasks, so
-their throughput must not be compared directly with Process fixtures. Docker
-requires separate daemon-backed testing. The HTTP service currently exposes
-tenant round robin only; a FIFO comparison must use the internal scheduler
-benchmark and state its different boundary.
+their throughput must not be compared directly with Process fixtures. The
+removed Docker backend is not part of these measurements. The HTTP service
+currently exposes tenant round robin only; a FIFO comparison must use the
+internal scheduler benchmark and state its different boundary.

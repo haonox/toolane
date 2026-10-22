@@ -19,13 +19,10 @@ func (m *Manager) worker() {
 			return
 		}
 		options := tool.RunOptions{
-			MaxOutputBytes:    snapshot.OutputLimitBytes,
-			OnOutputLimit:     func() { m.outputLimitReached(r) },
-			OnProcessStarted:  func(at time.Time) { m.processStarted(r, at) },
-			OnCleanupUpdate:   func(status, message string) { m.cleanupUpdated(r, status, message) },
-			OnResourceCreated: func(ref tool.ResourceRef) error { return m.resourceCreated(r, ref) },
-			SandboxResources:  tool.Resources{CPUMilli: snapshot.SandboxCPUMilli, MemoryBytes: snapshot.SandboxMemoryBytes},
-			ExecutionID:       snapshot.ID,
+			MaxOutputBytes:   snapshot.OutputLimitBytes,
+			OnOutputLimit:    func() { m.outputLimitReached(r) },
+			OnProcessStarted: func(at time.Time) { m.processStarted(r, at) },
+			ExecutionID:      snapshot.ID,
 		}
 		outcome, err := runTool(ctx, m.tools[snapshot.Tool].Execute, r.arguments, options)
 		if !m.complete(r, ctx, outcome, err) {
@@ -131,18 +128,6 @@ func (m *Manager) processStarted(r *record, at time.Time) {
 	}
 }
 
-func (m *Manager) cleanupUpdated(r *record, status, message string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if status != "succeeded" && status != "failed" {
-		return
-	}
-	next := cloneSnapshot(r.snapshot)
-	next.CleanupStatus = status
-	next.CleanupError = m.limitErrorMessage(message)
-	_ = m.applySnapshotKindLocked(r, next, "progress")
-}
-
 func (m *Manager) complete(r *record, ctx context.Context, outcome tool.Outcome, err error) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -171,13 +156,6 @@ func (m *Manager) complete(r *record, ctx context.Context, outcome tool.Outcome,
 		return false
 	}
 	r.outputEvents = outputEvents
-	cleanupFinalized := outcome.CleanupStatus == "pending" && (next.CleanupStatus == "succeeded" || next.CleanupStatus == "failed")
-	if outcome.CleanupStatus != "" && !cleanupFinalized {
-		next.CleanupStatus = outcome.CleanupStatus
-	}
-	if outcome.CleanupError != "" && !cleanupFinalized {
-		next.CleanupError = m.limitErrorMessage(outcome.CleanupError)
-	}
 	if outcome.StopUnconfirmed {
 		if next.State == Running {
 			next.State = Cancelling

@@ -12,7 +12,6 @@ flowchart LR
     M <--> S[(SQLite: tasks, workflows, events, keys)]
     M --> W[Bounded workers]
     W --> P[Trusted Process]
-    W --> D[Optional Docker]
     W --> X[Mock test tool]
     M --> E[SSE event replay]
     E --> A
@@ -85,13 +84,10 @@ tool process and the external system before deciding whether a new call is
 safe. The real-tool tests include an independent report file and append-only
 ledger to demonstrate this distinction.
 
-Docker is a separate, optional executor for use cases that need its container
-boundary. It is not a prerequisite for the trusted Process path or an implied
-sandbox around the HTTP service. When configured, startup checks its pinned
-image and policy and reconciles owned resources before opening HTTP admission;
-uncertain cleanup is recorded separately from task result. Whether to keep
-this backend is the P2 decision, based on its independent value, daemon
-dependency, maintenance cost, and actual container test coverage.
+The P2 decision removed the Docker executor. Toolane now offers the trusted
+Process path and the Mock test tool. It does not provide isolation for
+untrusted code. The [decision and migration record](docker-removal.md) explains
+the daemon dependency, test coverage, and handling of older Docker state.
 
 ## Evidence and limits
 

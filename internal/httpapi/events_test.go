@@ -37,8 +37,7 @@ func eventsFixture(t *testing.T) (*API, string) {
 		}}); err != nil {
 		t.Fatal(err)
 	}
-	manager, err := execution.NewDurableManager(context.Background(), execution.DefaultConfig(), registry, store,
-		func(context.Context, []execution.RecoveryResource) error { return nil })
+	manager, err := execution.NewDurableManager(context.Background(), execution.DefaultConfig(), registry, store)
 	if err != nil {
 		t.Fatal(err)
 	}

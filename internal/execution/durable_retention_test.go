@@ -24,7 +24,7 @@ func TestDurableRetentionProtectsKeysAndRejectsAdmission(t *testing.T) {
 		calls.Add(1)
 		return tool.Outcome{}, nil
 	})
-	m, err := NewDurableManager(ctx, config, registry, s, func(context.Context, []RecoveryResource) error { return nil })
+	m, err := NewDurableManager(ctx, config, registry, s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestDurableRetentionRemovesCachedTerminalOnAdmission(t *testing.T) {
 	registry := durableRegistry(t, func(context.Context, json.RawMessage, tool.RunOptions) (tool.Outcome, error) {
 		return tool.Outcome{}, nil
 	})
-	m, err := NewDurableManager(ctx, config, registry, s, func(context.Context, []RecoveryResource) error { return nil })
+	m, err := NewDurableManager(ctx, config, registry, s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestDurableRetentionRestartsWithProtectedOverCapacity(t *testing.T) {
 	})
 	config := DefaultConfig()
 	config.DurableRecordLimit = 2
-	m, err := NewDurableManager(ctx, config, registry, s, func(context.Context, []RecoveryResource) error { return nil })
+	m, err := NewDurableManager(ctx, config, registry, s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestDurableRetentionRestartsWithProtectedOverCapacity(t *testing.T) {
 	s = openDurableStore(t, dir)
 	defer s.Close()
 	config.DurableRecordLimit = 1
-	m, err = NewDurableManager(ctx, config, registry, s, func(context.Context, []RecoveryResource) error { return nil })
+	m, err = NewDurableManager(ctx, config, registry, s)
 	if err != nil {
 		t.Fatalf("startup rejected protected history: %v", err)
 	}

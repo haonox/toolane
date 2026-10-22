@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/haonox/toolane/internal/store/sqlite"
@@ -19,28 +18,17 @@ const executionEndpoint = "POST /api/v1/executions"
 const workflowEndpoint = "POST /api/v1/workflows"
 
 type storedRecord struct {
-	Snapshot  Snapshot          `json:"snapshot"`
-	Arguments []byte            `json:"arguments"`
-	Deadline  time.Time         `json:"queue_deadline"`
-	Resource  *tool.ResourceRef `json:"resource,omitempty"`
-	Limits    struct {
+	Snapshot       Snapshot        `json:"snapshot"`
+	Arguments      []byte          `json:"arguments"`
+	Deadline       time.Time       `json:"queue_deadline"`
+	LegacyResource json.RawMessage `json:"resource,omitempty"`
+	Limits         struct {
 		QueueTimeout       time.Duration `json:"queue_timeout_ns"`
 		ExecutionTimeout   time.Duration `json:"execution_timeout_ns"`
 		OutputLimitBytes   int           `json:"output_limit_bytes"`
 		ArgumentLimitBytes int           `json:"argument_limit_bytes"`
 		ResultLimitBytes   int           `json:"result_limit_bytes"`
 	} `json:"limits"`
-}
-
-// RecoveryResource ties a persisted resource to the execution that created it.
-// The recovery callback must also scan ownership labels: a crash may happen
-// after creation and before ResourceRef is committed.
-type RecoveryResource struct {
-	ExecutionID string
-	Ref         tool.ResourceRef
-	// AbsentConfirmed is set by the recovery callback only after the owned
-	// resource is verified absent. A stopped but retained container stays false.
-	AbsentConfirmed bool
 }
 
 type normalizedRequest struct {
@@ -53,16 +41,15 @@ type normalizedRequest struct {
 	OutputLimitBytes int             `json:"output_limit_bytes"`
 }
 
-// NewDurableManager coordinates previously accepted work before starting any
-// workers. recoverResources receives persisted references and must confirm
-// they are stopped or absent, while also scanning ownership labels for the
-// create-before-record crash window. A failure prevents admission. The caller
-// owns store and closes it after Manager.Close. An optional observer runs
+// NewDurableManager reconciles previously accepted work before starting any
+// workers. It rejects state with legacy Docker resources because this version
+// cannot clean up those resources. The caller owns store and closes it after
+// Manager.Close. An optional observer runs
 // synchronously under the Manager lock after each committed transition; it
 // must stay fast and must not call back into Manager.
-func NewDurableManager(ctx context.Context, config Config, registry *tool.Registry, store *sqlite.Store, recoverResources func(context.Context, []RecoveryResource) error, observers ...func(Snapshot, Snapshot)) (*Manager, error) {
-	if store == nil || recoverResources == nil {
-		return nil, errors.New("durable manager requires a store and resource recovery")
+func NewDurableManager(ctx context.Context, config Config, registry *tool.Registry, store *sqlite.Store, observers ...func(Snapshot, Snapshot)) (*Manager, error) {
+	if store == nil {
+		return nil, errors.New("durable manager requires a store")
 	}
 	if len(observers) > 1 {
 		return nil, errors.New("at most one transition observer is allowed")
@@ -88,22 +75,16 @@ func NewDurableManager(ctx context.Context, config Config, registry *tool.Regist
 	if err != nil {
 		return nil, fmt.Errorf("list executions before recovery: %w", err)
 	}
-	resources, err := recoveryResources(rows)
-	if err != nil {
-		return nil, fmt.Errorf("read owned resources: %w", err)
-	}
-	if err := recoverResources(ctx, resources); err != nil {
-		return nil, fmt.Errorf("recover owned resources: %w", err)
-	}
-	if err := reconcileRecoveredCleanup(ctx, store, resources); err != nil {
-		return nil, fmt.Errorf("reconcile recovered cleanup: %w", err)
+	for _, row := range rows {
+		if _, err := decodeStoredExecution(row); err != nil {
+			return nil, fmt.Errorf("inspect execution before recovery: %w", err)
+		}
 	}
 	_, err = store.Prune(ctx, sqlite.RetentionPolicy{MaxRecords: config.DurableRecordLimit, MaxAge: config.DurableRetention, Now: time.Now().UTC()})
 	if err != nil && !errors.Is(err, sqlite.ErrRetentionCapacity) {
 		return nil, fmt.Errorf("prune durable records before recovery: %w", err)
 	}
-	// Pruning follows resource recovery, so reconstruct from the rows that
-	// still exist rather than the earlier recovery scan.
+	// Reconstruct from the rows that still exist after retention pruning.
 	rows, err = store.ListExecutions(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list executions after pruning: %w", err)
@@ -123,73 +104,6 @@ func NewDurableManager(ctx context.Context, config Config, registry *tool.Regist
 	claimed = false
 	m.startWorkers()
 	return m, nil
-}
-
-func reconcileRecoveredCleanup(ctx context.Context, store *sqlite.Store, resources []RecoveryResource) error {
-	for _, resource := range resources {
-		if !resource.AbsentConfirmed {
-			continue
-		}
-		row, err := store.GetExecution(ctx, resource.ExecutionID)
-		if err != nil {
-			return err
-		}
-		r, err := decodeStoredExecution(row)
-		if err != nil {
-			return err
-		}
-		if r.resource == nil || *r.resource != resource.Ref {
-			return fmt.Errorf("recovered resource for execution %s changed during cleanup", resource.ExecutionID)
-		}
-		if r.snapshot.CleanupStatus == "succeeded" {
-			continue
-		}
-		next := cloneSnapshot(r.snapshot)
-		next.CleanupStatus = "succeeded"
-		next.CleanupError = ""
-		encoded, err := encodeStoredExecution(r, next)
-		if err != nil {
-			return err
-		}
-		at := time.Now().UTC()
-		event, err := stateEvent(next, at)
-		if err != nil {
-			return err
-		}
-		event.Kind = "progress"
-		if _, err := store.Transition(ctx, row.ID, row.Version, string(next.State), encoded, event); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// ConfirmRecoveredCleanup records a recovered resource as cleaned after the
-// caller verifies that its persisted container ID is absent. It is safe to
-// retry after a database error or a concurrent confirmation.
-func (m *Manager) ConfirmRecoveredCleanup(executionID string, ref tool.ResourceRef) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.store == nil {
-		return errors.New("recovered cleanup requires a durable manager")
-	}
-	if m.storeError != nil {
-		return m.storeError
-	}
-	r := m.records[executionID]
-	if r == nil {
-		return ErrNotFound
-	}
-	if r.resource == nil || *r.resource != ref || r.snapshot.FinishedAt == nil {
-		return errors.New("recovered cleanup does not match a finished execution resource")
-	}
-	if r.snapshot.CleanupStatus == "succeeded" {
-		return nil
-	}
-	next := cloneSnapshot(r.snapshot)
-	next.CleanupStatus = "succeeded"
-	next.CleanupError = ""
-	return m.applySnapshotKindLocked(r, next, "progress")
 }
 
 // pruneDurableLocked runs under the manager lock so an admission cannot race
@@ -308,7 +222,7 @@ func encodeNormalizedWorkflowRequest(req WorkflowRequest, prepared []preparedReq
 }
 
 func encodeStoredExecution(r *record, next Snapshot) ([]byte, error) {
-	value := storedRecord{Snapshot: next, Arguments: r.arguments, Deadline: r.deadline, Resource: r.resource}
+	value := storedRecord{Snapshot: next, Arguments: r.arguments, Deadline: r.deadline}
 	value.Limits.QueueTimeout = next.QueueTimeout
 	value.Limits.ExecutionTimeout = next.ExecutionTimeout
 	value.Limits.OutputLimitBytes = next.OutputLimitBytes
@@ -331,34 +245,10 @@ func decodeStoredExecution(row sqlite.Execution) (*record, error) {
 	s.OutputLimitBytes = value.Limits.OutputLimitBytes
 	s.ArgumentLimitBytes = value.Limits.ArgumentLimitBytes
 	s.ResultLimitBytes = value.Limits.ResultLimitBytes
-	if value.Resource != nil {
-		if err := validateResourceRef(*value.Resource); err != nil {
-			return nil, fmt.Errorf("execution %s has invalid resource: %w", row.ID, err)
-		}
+	if len(value.LegacyResource) > 0 && string(value.LegacyResource) != "null" {
+		return nil, fmt.Errorf("execution %s contains a legacy Docker resource; use a new state directory after resolving owned containers", row.ID)
 	}
-	return &record{snapshot: s, arguments: value.Arguments, deadline: value.Deadline, version: row.Version, resource: value.Resource}, nil
-}
-
-func validateResourceRef(ref tool.ResourceRef) error {
-	if ref.Kind != tool.ResourceDockerContainer || ref.ID == "" || len(ref.ID) > 128 ||
-		ref.InstanceID == "" || len(ref.InstanceID) > 32 || strings.ContainsAny(ref.ID, " \t\r\n") {
-		return errors.New("invalid Docker resource reference")
-	}
-	return nil
-}
-
-func recoveryResources(rows []sqlite.Execution) ([]RecoveryResource, error) {
-	var resources []RecoveryResource
-	for _, row := range rows {
-		r, err := decodeStoredExecution(row)
-		if err != nil {
-			return nil, err
-		}
-		if r.resource != nil && r.snapshot.CleanupStatus != "succeeded" {
-			resources = append(resources, RecoveryResource{ExecutionID: row.ID, Ref: *r.resource})
-		}
-	}
-	return resources, nil
+	return &record{snapshot: s, arguments: value.Arguments, deadline: value.Deadline, version: row.Version}, nil
 }
 
 func stateEvent(snapshot Snapshot, at time.Time) (sqlite.Event, error) {
@@ -520,55 +410,6 @@ func (m *Manager) applySnapshotKindLocked(r *record, next Snapshot, kind string)
 	if m.transitionObserver != nil {
 		m.transitionObserver(before, next)
 	}
-	return nil
-}
-
-// resourceCreated records ownership before a newly created resource can start.
-// The Docker executor must still remove it if this callback returns an error.
-func (m *Manager) resourceCreated(r *record, ref tool.ResourceRef) error {
-	if err := validateResourceRef(ref); err != nil {
-		return err
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.storeError != nil {
-		return m.storeError
-	}
-	if r.resource != nil || r.snapshot.State != Running && r.snapshot.State != Cancelling {
-		return errors.New("execution cannot accept another created resource")
-	}
-	next := cloneSnapshot(r.snapshot)
-	next.CleanupStatus = "pending"
-	if m.store != nil {
-		copyOf := *r
-		copyOf.resource = &ref
-		encoded, err := encodeStoredExecution(&copyOf, next)
-		if err != nil {
-			m.haltStoreLocked(err)
-			return err
-		}
-		at := time.Now().UTC()
-		payload, err := json.Marshal(struct {
-			ResourceKind string    `json:"resource_kind"`
-			At           time.Time `json:"at"`
-		}{ref.Kind, at})
-		if err != nil {
-			m.haltStoreLocked(err)
-			return err
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		version, err := m.store.Transition(ctx, next.ID, r.version, string(next.State), encoded,
-			sqlite.Event{Kind: "resource_created", Payload: payload, OccurredAt: at})
-		if err != nil {
-			m.haltStoreLocked(err)
-			return err
-		}
-		r.version = version
-		m.notifyEventsLocked(next.ID)
-	}
-	r.resource = &ref
-	r.snapshot = next
 	return nil
 }
 

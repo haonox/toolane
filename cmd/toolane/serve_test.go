@@ -16,10 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/haonox/toolane/internal/execution"
-	"github.com/haonox/toolane/internal/executor/docker"
 	"github.com/haonox/toolane/internal/httpapi"
-	"github.com/haonox/toolane/internal/tool"
 )
 
 func TestLoadServerConfigRequiresPrivateLoopbackConfiguration(t *testing.T) {
@@ -40,6 +37,7 @@ func TestLoadServerConfigRequiresPrivateLoopbackConfiguration(t *testing.T) {
 		strings.Replace(valid, "mock.delay", "process.printf", 1),
 		strings.Replace(valid, `"tokens":`, `"sse_tenant_limit":9,"sse_global_limit":8,"tokens":`, 1),
 		valid + `{}`,
+		strings.Replace(valid, `"tokens":`, `"docker":{},"tokens":`, 1),
 	} {
 		if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
 			t.Fatal(err)
@@ -56,95 +54,41 @@ func TestLoadServerConfigRequiresPrivateLoopbackConfiguration(t *testing.T) {
 	}
 }
 
-func TestDockerServiceConfigurationAndFailClosedRecovery(t *testing.T) {
+func TestRemovedDockerConfigurationAndStateAreRejected(t *testing.T) {
+	if _, err := processToolDefinition(serverProcessToolConfig{Name: "sandbox.shell"}); err == nil {
+		t.Fatal("removed sandbox.shell name accepted for a Process tool")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "server.json")
-	config := serverConfig{Listen: "127.0.0.1:0", StateDir: filepath.Join(dir, "state"),
-		Tokens: []httpapi.Token{{Value: "docker-service-token-12345", TenantID: "local", Tools: []string{sandboxToolName}}},
-		Docker: &serverDockerConfig{ImageTag: "alpine:3.24.2", ImageDigest: "sha256:" + strings.Repeat("a", 64),
-			InstanceID: "service-test", DockerBinary: "/bin/false"}}
-	write := func() {
-		t.Helper()
-		raw, err := json.Marshal(config)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, raw, 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write()
-	parsed, err := loadServerConfig(path)
-	if err != nil || parsed.Docker == nil || parsed.Docker.InstanceID != config.Docker.InstanceID {
-		t.Fatalf("valid Docker config: %+v err=%v", parsed, err)
-	}
-	if err := runServer(context.Background(), path); err == nil || !strings.Contains(err.Error(), "recover Docker containers") {
-		t.Fatalf("unavailable daemon opened service: %v", err)
-	}
-	backend, err := docker.NewBackend(docker.Spec{ImageTag: config.Docker.ImageTag, ImageDigest: config.Docker.ImageDigest,
-		InstanceID: config.Docker.InstanceID, DockerBinary: config.Docker.DockerBinary})
-	if err != nil {
+	stateDir := filepath.Join(dir, "state")
+	if err := os.Mkdir(stateDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		if err := backend.Close(context.Background()); err != nil {
-			t.Error(err)
-		}
-	})
-	resources := []execution.RecoveryResource{{ExecutionID: strings.Repeat("a", 32), Ref: tool.ResourceRef{
-		Kind: tool.ResourceDockerContainer, ID: strings.Repeat("b", 64), InstanceID: "old-instance"}}}
-	if err := recoverServerResources(context.Background(), backend, config.Docker, resources); err == nil || !strings.Contains(err.Error(), "another backend") {
-		t.Fatalf("foreign instance resource accepted: %v", err)
+	raw := `{"listen":"127.0.0.1:0","state_dir":"` + stateDir + `","docker":{"image_tag":"legacy"},"tokens":[{"token":"private-token-123456","tenant_id":"local","tools":["mock.delay"]}]}`
+	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
 	}
-	config.Docker = nil
-	write()
 	if _, err := loadServerConfig(path); err == nil {
-		t.Fatal("sandbox token accepted without Docker configuration")
+		t.Fatal("legacy Docker configuration accepted")
 	}
-	if err := recoverServerResources(context.Background(), nil, nil, resources); err == nil {
-		t.Fatal("persisted Docker resource accepted without backend")
-	}
-	config.Docker = &serverDockerConfig{ImageTag: "alpine:3.24.2", InstanceID: "service-test"}
-	write()
-	if _, err := loadServerConfig(path); err == nil {
-		t.Fatal("Docker configuration without digest accepted")
-	}
-}
-
-func TestDockerInstanceBindingRequiresStableConfiguration(t *testing.T) {
-	stateDir := t.TempDir()
-	config := &serverDockerConfig{InstanceID: "stable-instance"}
-	if err := checkDockerInstanceBinding(stateDir, config); err != nil {
+	if err := rejectLegacyDockerState(stateDir); err != nil {
 		t.Fatalf("new state directory rejected: %v", err)
 	}
-	if err := bindDockerInstance(stateDir, config.InstanceID); err != nil {
-		t.Fatalf("bind instance: %v", err)
-	}
-	if err := bindDockerInstance(stateDir, config.InstanceID); err != nil {
-		t.Fatalf("same instance rejected: %v", err)
-	}
-	if err := checkDockerInstanceBinding(stateDir, config); err != nil {
-		t.Fatalf("stable configuration rejected: %v", err)
-	}
-	if err := checkDockerInstanceBinding(stateDir, nil); err == nil {
-		t.Fatal("Docker removal accepted after instance binding")
-	}
-	if err := checkDockerInstanceBinding(stateDir, &serverDockerConfig{InstanceID: "replacement"}); err == nil {
-		t.Fatal("instance ID change accepted")
-	}
-	if err := bindDockerInstance(stateDir, "replacement"); err == nil {
-		t.Fatal("instance binding overwritten")
-	}
-	path := filepath.Join(stateDir, dockerInstanceFile)
-	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0600 {
-		t.Fatalf("binding is not private: info=%v err=%v", info, err)
-	}
-	if err := os.WriteFile(path, []byte("partial"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(stateDir, ".docker-instance-id"), []byte("legacy\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkDockerInstanceBinding(stateDir, config); err == nil {
-		t.Fatal("incomplete instance binding accepted")
+	if err := rejectLegacyDockerState(stateDir); err == nil || !strings.Contains(err.Error(), "removed Docker backend") {
+		t.Fatalf("legacy state directory accepted: %v", err)
+	}
+	raw = `{"listen":"127.0.0.1:0","state_dir":"` + stateDir + `","tokens":[{"token":"private-token-123456","tenant_id":"local","tools":["mock.delay"]}]}`
+	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runServer(context.Background(), path); err == nil || !strings.Contains(err.Error(), "removed Docker backend") {
+		t.Fatalf("service started with legacy state: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "toolane.sqlite")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy state was modified before rejection: %v", err)
 	}
 }
 
