@@ -2,6 +2,8 @@
 
 **面向 Agent 工具调用的单机调度与受限执行服务。** Toolane 接收任务，管理队列、租户配额与 DAG 依赖，通过统一的 Executor 运行工具，并提供持久化的 HTTP 接口。它负责可靠执行；调用方负责决定使用什么工具。
 
+[架构与故障语义](docs/architecture.md) · [真实工具实验与复现](benchmarks/README.md)
+
 Linux · Go 1.27.1 · SQLite · HTTP + SSE · 可选 Docker 沙箱 · [Apache-2.0](LICENSE)
 
 ## 特性
@@ -158,6 +160,7 @@ go test -race ./...
 go vet ./...
 python3 -m unittest discover -s examples -p 'test_*.py'
 python3 -m unittest discover -s tests/fixtures -p 'test_*.py'
+python3 -m unittest discover -s benchmarks -p 'test_*.py'
 ```
 
 真实 Docker 集成测试需要本地 daemon 权限和已拉取的固定镜像：
@@ -174,7 +177,7 @@ sudo env PATH="$PATH" GOCACHE=/tmp/toolane-go-cache \
   go test -tags=integration ./cmd/toolane ./tests/integration/... -count=1
 ```
 
-`benchmarks/` 包含调度基准与本地 HTTP 负载脚本；对应原始结果保存在 [`benchmarks/results/`](benchmarks/results/) 中。它们分别测量 Mock 路径，不能当作真实容器吞吐数据。
+`benchmarks/` 包含调度基准、历史 Mock HTTP 负载脚本，以及新的 [真实 Process 工具实验脚本](benchmarks/README.md)。现有 [`benchmarks/results/`](benchmarks/results/) 是历史 Mock 结果；真实工具报告应由测试人员在其机器上用固定二进制和负载生成，不能用 Mock 或直接进程成绩代替。
 
 | 路径 | 内容 |
 | --- | --- |
