@@ -1,16 +1,10 @@
-# Reproducible local experiments
+# 可复现的本地实验
 
-`run_real_tools.py` runs the three trusted Process fixtures through the normal
-HTTP and SQLite path. It starts a new Toolane service, private state directory,
-three tenant credentials, two simulated Agents per tenant, and a controlled
-loopback query service for **each** short scenario and repetition. It never
-stores credentials in the output. Linux and Python 3 standard library are
-required.
+`run_real_tools.py` 通过正常的 HTTP 和 SQLite 路径运行三个可信的 Process 测试工具。对于短时测试的每个场景及每次重复实验，它都会启动一个新的 Toolane 服务、一个私有状态目录、三个租户的凭据、每个租户两个模拟 Agent，以及一个受控的本机回环查询服务。输出中不保存凭据。运行环境需要 Linux 和 Python 3 标准库。
 
-Each run first completes six unmeasured warmup calls, one per simulated Agent.
-Their IDs and states are saved in `warmup.json`.
+每次运行会先完成六次不计入测量的预热调用，每个模拟 Agent 一次。预热调用的 ID 和状态保存在 `warmup.json` 中。
 
-Build the exact binary to measure, then choose a new output directory:
+先构建本次要测量的确切二进制文件，再选择一个新的输出目录：
 
 ```bash
 go build -o /tmp/toolane-bench ./cmd/toolane
@@ -18,12 +12,9 @@ python3 benchmarks/run_real_tools.py \
   --binary /tmp/toolane-bench --out /tmp/toolane-real-smoke --profile smoke
 ```
 
-The smoke profile is run in CI. It checks end-to-end wiring, result correctness,
-failure/timeout propagation, and the independent report ledger. Its small
-sample is **not** a throughput claim.
+CI 会运行 `smoke` 配置，检查端到端调用链、结果正确性、失败与超时传播，以及独立报告账本。它的样本量很小，**不能据此宣称吞吐能力**。
 
-For the controlled short matrix, run at least three independent repetitions
-on one machine with a fixed binary and seed:
+运行受控的短时测试矩阵时，应在同一台机器上使用固定的二进制文件和随机种子，至少独立重复三次：
 
 ```bash
 python3 benchmarks/run_real_tools.py \
@@ -31,18 +22,9 @@ python3 benchmarks/run_real_tools.py \
   --profile short --repetitions 3 --seed 20261021
 ```
 
-The short profile covers direct and Toolane serial baselines for tenant A and
-one Agent, then scheduled CPU
-and 50/200 ms I/O arrivals, fixed-concurrency I/O, 1-second reports, an
-uneven tenant burst, overload, and a mixture with failure, timeout, and
-cancellation. Planned and actual send times are both recorded; schedule lag
-exposes when the client could not keep up. The first 24 start counts by tenant
-are included in `summary.json` for inspecting fairness under comparable work.
-There is no preset QPS target. Compare runs only with the same host, binary,
-tool data, and workload options.
+`short` 配置先测量租户 A、单个 Agent 的直接调用与经 Toolane 串行调用基线，再覆盖按计划到达的 CPU 任务和 50/200 毫秒 I/O 任务、固定并发的 I/O 任务、耗时 1 秒的报告任务、不均衡的租户突发、超载，以及包含失败、超时和取消的混合负载。脚本同时记录计划发送时间与实际发送时间；两者的差值可显示客户端何时未能跟上计划。`summary.json` 还记录了各租户在前 24 次任务启动中的次数，用于观察可比负载下的调度公平性。实验没有预设 QPS 目标；只有主机、二进制文件、工具数据和负载参数一致时，才适合比较结果。
 
-For an initial sustained run, use one continuously running service per
-repetition. Its default duration is 1,800 seconds:
+初步持续运行时，每次重复实验使用一个始终运行的服务。默认时长为 1,800 秒：
 
 ```bash
 python3 benchmarks/run_real_tools.py \
@@ -50,24 +32,12 @@ python3 benchmarks/run_real_tools.py \
   --profile soak --duration-seconds 1800
 ```
 
-Each output directory contains `metadata.json`, `summary.json`, `REPORT.md`,
-and a SHA-256 `manifest.json` for the saved artifacts. Under
-`runs/<scenario>-r<repetition>/` it stores:
+每个输出目录包含 `metadata.json`、`summary.json`、`REPORT.md`，以及记录产物 SHA-256 的 `manifest.json`。`runs/<scenario>-r<repetition>/` 下保存：
 
-- `executions.csv`: every planned task, input, submission time, response,
-  final state, and separate queue, run, and end-to-end durations;
-- `resources.csv` and `minutes.csv`: server CPU/RSS, scheduler gauges, SQLite
-  main/WAL sizes, and per-minute completion and p95 duration;
-- `ledger.jsonl` and `reports/*.json` for cases with successful reports,
-  plus local service logs.
+- `executions.csv`：每个计划任务的输入、提交时间、响应、最终状态，以及分别计算的排队、运行和端到端时长；
+- `resources.csv` 和 `minutes.csv`：服务 CPU/RSS、调度器指标、SQLite 主文件与 WAL 文件大小，以及每分钟完成数和 p95 时长；
+- `ledger.jsonl`、成功生成的 `reports/*.json`，以及本地服务日志。
 
-The runner checks real tool output and reconciles each successful report's
-SHA-256 with the independent ledger. It fails on an unexpected state or
-missing/duplicate side effect. `REPORT.md` lists coverage limits. Keep a
-result only when the command exits successfully; a failed run may leave
-partial diagnostics.
+运行器会校验真实工具的输出，并将每份成功报告的 SHA-256 与独立账本核对。出现意外状态，或外部副作用缺失、重复时，实验会失败。`REPORT.md` 列出测试覆盖的边界。只有命令成功退出，才应保留其结果用于分析；失败的运行可能留下不完整的诊断文件。
 
-The older `run_http_service.py` and `http_service.py` measure Mock tasks, so
-their throughput must not be compared directly with Process fixtures. The HTTP
-service currently exposes tenant round robin only; a FIFO comparison must use the
-internal scheduler benchmark and state its different boundary.
+`run_http_service.py` 和 `http_service.py` 测量的是 Mock 任务，不能将其吞吐量直接与 Process 测试工具比较。当前 HTTP 服务只提供租户轮询调度；如需比较 FIFO，应使用内部调度器基准，并说明两者测量范围不同。
