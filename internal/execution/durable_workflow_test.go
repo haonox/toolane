@@ -34,7 +34,7 @@ func TestDurableWorkflowRunsAndSurvivesRestart(t *testing.T) {
 	config := DefaultConfig()
 	config.Workers = 1
 	config.RetainedResults = 1 // Completed batch must remain readable from SQLite.
-	m, err := NewDurableManager(ctx, config, registry, s)
+	m, err := NewManager(ctx, config, registry, s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestDurableWorkflowRunsAndSurvivesRestart(t *testing.T) {
 	}
 	s = openDurableStore(t, dir)
 	defer s.Close()
-	m, err = NewDurableManager(ctx, config, registry, s)
+	m, err = NewManager(ctx, config, registry, s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestDurableWorkflowRecoveryInterruptsClaimAndKeepsIndependentBranch(t *test
 		calls.Add(1)
 		return tool.Outcome{}, nil
 	})
-	m, err := NewDurableManager(ctx, DefaultConfig(), registry, s)
+	m, err := NewManager(ctx, DefaultConfig(), registry, s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestDurableWorkflowRecoveryRepairsReadyChild(t *testing.T) {
 		calls.Add(1)
 		return tool.Outcome{}, nil
 	})
-	m, err := NewDurableManager(ctx, DefaultConfig(), registry, s)
+	m, err := NewManager(ctx, DefaultConfig(), registry, s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ func TestDurableWorkflowCancelPersistsAllNodes(t *testing.T) {
 	})
 	config := DefaultConfig()
 	config.Workers = 1
-	m, err := NewDurableManager(ctx, config, registry, s)
+	m, err := NewManager(ctx, config, registry, s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func TestDurableWorkflowRecoveryRepairsSummaryAfterLastNode(t *testing.T) {
 		calls.Add(1)
 		return tool.Outcome{}, nil
 	})
-	m, err := NewDurableManager(ctx, DefaultConfig(), registry, s)
+	m, err := NewManager(ctx, DefaultConfig(), registry, s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestDurableWorkflowRecoveryFinishesAcceptedCancellation(t *testing.T) {
 		calls.Add(1)
 		return tool.Outcome{}, nil
 	})
-	m, err := NewDurableManager(ctx, DefaultConfig(), registry, s)
+	m, err := NewManager(ctx, DefaultConfig(), registry, s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +316,7 @@ func TestDurableWorkflowIdempotencyBeforeCapacityAndAfterRestart(t *testing.T) {
 	config := DefaultConfig()
 	config.Workers = 1
 	config.QueueCapacity = 2
-	m, err := NewDurableManager(ctx, config, registry, s)
+	m, err := NewManager(ctx, config, registry, s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,7 +356,7 @@ func TestDurableWorkflowIdempotencyBeforeCapacityAndAfterRestart(t *testing.T) {
 	}
 	s = openDurableStore(t, dir)
 	defer s.Close()
-	m, err = NewDurableManager(ctx, config, registry, s)
+	m, err = NewManager(ctx, config, registry, s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +373,9 @@ func TestNormalizedWorkflowDependencyOrder(t *testing.T) {
 	registry := durableRegistry(t, func(context.Context, json.RawMessage, tool.RunOptions) (tool.Outcome, error) {
 		return tool.Outcome{}, nil
 	})
-	m, err := newManager(config, registry, nil)
+	store := openDurableStore(t, filepath.Join(t.TempDir(), "state"))
+	defer store.Close()
+	m, err := newManager(config, registry, store)
 	if err != nil {
 		t.Fatal(err)
 	}

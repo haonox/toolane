@@ -3,7 +3,6 @@ package execution
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"time"
 	"unicode/utf8"
 
@@ -18,12 +17,9 @@ const (
 // SubscribeEvents registers a one-slot, coalescing notification before the
 // caller replays SQLite history. Notifications never carry event data: a slow
 // reader always catches up from the durable sequence instead.
-func (m *Manager) SubscribeEvents(id string) (<-chan struct{}, func(), error) {
+func (m *Manager) SubscribeEvents(id string) (<-chan struct{}, func()) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.store == nil {
-		return nil, nil, errors.New("event subscription requires durable storage")
-	}
 	ch := make(chan struct{}, 1)
 	if m.eventWatchers[id] == nil {
 		m.eventWatchers[id] = make(map[chan struct{}]struct{})
@@ -36,7 +32,7 @@ func (m *Manager) SubscribeEvents(id string) (<-chan struct{}, func(), error) {
 		if len(m.eventWatchers[id]) == 0 {
 			delete(m.eventWatchers, id)
 		}
-	}, nil
+	}
 }
 
 func (m *Manager) notifyEventsLocked(id string) {
@@ -51,25 +47,16 @@ func (m *Manager) notifyEventsLocked(id string) {
 // EventBounds and EventsAfterLimit expose only persisted events. HTTP checks
 // tenant ownership before calling either method.
 func (m *Manager) EventBounds(ctx context.Context, id string, after int64) (int64, int64, int64, error) {
-	if m.store == nil {
-		return 0, 0, 0, errors.New("event replay requires durable storage")
-	}
 	return m.store.EventBounds(ctx, id, after)
 }
 
 func (m *Manager) EventsAfterLimit(ctx context.Context, id string, after int64, limit int) ([]sqlite.Event, error) {
-	if m.store == nil {
-		return nil, errors.New("event replay requires durable storage")
-	}
 	return m.store.EventsAfterLimit(ctx, id, after, limit)
 }
 
 // outputEventsLocked prepares at most 1024 UTF-8-safe chunks. The next state
 // transition writes them atomically with the resulting snapshot.
 func (m *Manager) outputEventsLocked(stdout, stderr string) ([]sqlite.Event, error) {
-	if m.store == nil {
-		return nil, nil
-	}
 	events := make([]sqlite.Event, 0)
 	for _, stream := range []struct{ name, data string }{{"stdout", stdout}, {"stderr", stderr}} {
 		for len(stream.data) > 0 && len(events) < maxOutputEvents {

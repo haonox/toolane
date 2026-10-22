@@ -533,7 +533,7 @@ def report(metadata, summaries):
               "- CPU and RSS samples cover the Toolane server process only; fixture subprocess usage is not included.",
               "- The smoke profile checks wiring only; its rates and percentiles are not capacity evidence.",
               "- This script does not run a FIFO HTTP server comparison because the public service fixes tenant round robin.",
-              "- The short profile does not establish long-term memory stability. Use the 30-minute soak profile and inspect per-minute resource samples.",
+              "- The short profile does not establish long-term resource stability. Use the 30-minute soak profile and inspect per-minute resource samples.",
               "- Forced-crash semantics and external side effects are asserted by Go integration tests, not by timing measurements here.", ""]
     return "\n".join(lines)
 

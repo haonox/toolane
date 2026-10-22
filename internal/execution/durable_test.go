@@ -56,7 +56,7 @@ func TestDurableAdmissionClaimAndCompletion(t *testing.T) {
 		seenState = State(row.State)
 		return tool.Outcome{Result: json.RawMessage(`{"ok":true}`)}, nil
 	})
-	m, err := NewDurableManager(ctx, DefaultConfig(), registry, s)
+	m, err := NewManager(ctx, DefaultConfig(), registry, s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestDurableIdempotencyBeforeCapacityCheck(t *testing.T) {
 		}
 		return tool.Outcome{}, nil
 	})
-	m, err := NewDurableManager(ctx, config, registry, s)
+	m, err := NewManager(ctx, config, registry, s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func TestDurableRestartResumesQueuedAndInterruptsClaimed(t *testing.T) {
 		calls.Add(1)
 		return tool.Outcome{}, nil
 	})
-	m, err := NewDurableManager(ctx, DefaultConfig(), registry, s)
+	m, err := NewManager(ctx, DefaultConfig(), registry, s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,11 +229,11 @@ func TestDurableRuntimeClaimPreventsSecondManager(t *testing.T) {
 		calls.Add(1)
 		return tool.Outcome{}, nil
 	})
-	m, err := NewDurableManager(ctx, DefaultConfig(), registry, s)
+	m, err := NewManager(ctx, DefaultConfig(), registry, s)
 	if err != nil {
 		t.Fatalf("failed constructor retained runtime claim: %v", err)
 	}
-	if _, err := NewDurableManager(ctx, DefaultConfig(), registry, s); !errors.Is(err, sqlite.ErrRuntimeOwned) {
+	if _, err := NewManager(ctx, DefaultConfig(), registry, s); !errors.Is(err, sqlite.ErrRuntimeOwned) {
 		t.Fatalf("second manager on one store: %v", err)
 	}
 	if err := s.Close(); !errors.Is(err, sqlite.ErrRuntimeOwned) {
@@ -262,7 +262,7 @@ func TestDurableCancelAndTimeoutArePersisted(t *testing.T) {
 		<-ctx.Done()
 		return tool.Outcome{}, ctx.Err()
 	})
-	m, err := NewDurableManager(ctx, config, registry, s)
+	m, err := NewManager(ctx, config, registry, s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestDurableClaimFailureDoesNotRunTool(t *testing.T) {
 		}
 		return tool.Outcome{}, nil
 	})
-	m, err := NewDurableManager(ctx, config, registry, s)
+	m, err := NewManager(ctx, config, registry, s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,7 +389,7 @@ func TestDurableRejectsUnknownStoredFieldsBeforeRecovery(t *testing.T) {
 		calls.Add(1)
 		return tool.Outcome{}, nil
 	})
-	if _, err := NewDurableManager(ctx, DefaultConfig(), registry, s); err == nil || !strings.Contains(err.Error(), `unknown field "unexpected"`) {
+	if _, err := NewManager(ctx, DefaultConfig(), registry, s); err == nil || !strings.Contains(err.Error(), `unknown field "unexpected"`) {
 		t.Fatalf("unknown stored field accepted: %v", err)
 	}
 	unchanged, err := s.GetExecution(ctx, "claimed")

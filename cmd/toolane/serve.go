@@ -182,7 +182,7 @@ func runServerWithLogger(ctx context.Context, configPath string, logger *slog.Lo
 			logger.Warn("transition_logs_dropped", "count", count)
 		}
 	}()
-	manager, err := execution.NewDurableManager(ctx, execution.DefaultConfig(), registry, store,
+	manager, err := execution.NewManager(ctx, execution.DefaultConfig(), registry, store,
 		func(before, after execution.Snapshot) {
 			metrics.RecordChange(observability.Change{BeforeState: string(before.State), AfterState: string(after.State),
 				BeforeCleanup: before.CleanupStatus, AfterCleanup: after.CleanupStatus, CreatedAt: after.CreatedAt,

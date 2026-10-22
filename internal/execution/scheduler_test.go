@@ -373,7 +373,7 @@ func TestTenantIdentityAndSchedulerConfiguration(t *testing.T) {
 	}
 	awaitState(t, m, local.ID, Succeeded)
 	config.Scheduler = "unexpected"
-	if _, err := NewManager(config, nil); err == nil {
+	if err := config.validate(); err == nil {
 		t.Fatal("invalid scheduler accepted")
 	}
 }

@@ -40,13 +40,13 @@ type normalizedRequest struct {
 	OutputLimitBytes int             `json:"output_limit_bytes"`
 }
 
-// NewDurableManager reconciles previously accepted work before starting any
+// NewManager reconciles previously accepted work before starting any
 // workers. The caller owns store and closes it after Manager.Close. An optional
 // observer runs synchronously under the Manager lock after each committed
 // transition; it must stay fast and must not call back into Manager.
-func NewDurableManager(ctx context.Context, config Config, registry *tool.Registry, store *sqlite.Store, observers ...func(Snapshot, Snapshot)) (*Manager, error) {
+func NewManager(ctx context.Context, config Config, registry *tool.Registry, store *sqlite.Store, observers ...func(Snapshot, Snapshot)) (*Manager, error) {
 	if store == nil {
-		return nil, errors.New("durable manager requires a store")
+		return nil, errors.New("manager requires a store")
 	}
 	if len(observers) > 1 {
 		return nil, errors.New("at most one transition observer is allowed")
@@ -346,16 +346,14 @@ func (m *Manager) transitionWorkflowLocked(w *workflow, state State, finishedAt 
 	if w.state == state && (w.finishedAt != nil) == (finishedAt != nil) {
 		return nil
 	}
-	if m.store != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		version, err := m.store.TransitionWorkflow(ctx, w.id, w.version, string(state), finishedAt)
-		if err != nil {
-			m.haltStoreLocked(err)
-			return err
-		}
-		w.version = version
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	version, err := m.store.TransitionWorkflow(ctx, w.id, w.version, string(state), finishedAt)
+	if err != nil {
+		m.haltStoreLocked(err)
+		return err
 	}
+	w.version = version
 	w.state = state
 	w.finishedAt = finishedAt
 	return nil
@@ -381,29 +379,27 @@ func (m *Manager) applySnapshotLocked(r *record, next Snapshot) error {
 }
 
 func (m *Manager) applySnapshotKindLocked(r *record, next Snapshot, kind string) error {
-	if m.store != nil {
-		encoded, err := encodeStoredExecution(r, next)
-		if err != nil {
-			m.haltStoreLocked(err)
-			return err
-		}
-		event, err := stateEvent(next, time.Now().UTC())
-		if err != nil {
-			m.haltStoreLocked(err)
-			return err
-		}
-		event.Kind = kind
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		version, err := m.store.TransitionWithEvents(ctx, next.ID, r.version, string(next.State), encoded, r.outputEvents, event)
-		if err != nil {
-			m.haltStoreLocked(err)
-			return err
-		}
-		r.version = version
-		r.outputEvents = nil
-		m.notifyEventsLocked(next.ID)
+	encoded, err := encodeStoredExecution(r, next)
+	if err != nil {
+		m.haltStoreLocked(err)
+		return err
 	}
+	event, err := stateEvent(next, time.Now().UTC())
+	if err != nil {
+		m.haltStoreLocked(err)
+		return err
+	}
+	event.Kind = kind
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	version, err := m.store.TransitionWithEvents(ctx, next.ID, r.version, string(next.State), encoded, r.outputEvents, event)
+	if err != nil {
+		m.haltStoreLocked(err)
+		return err
+	}
+	r.version = version
+	r.outputEvents = nil
+	m.notifyEventsLocked(next.ID)
 	before := r.snapshot
 	r.snapshot = next
 	if m.transitionObserver != nil {

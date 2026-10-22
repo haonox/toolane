@@ -34,7 +34,7 @@ func apiFixture(t *testing.T) *API {
 	if err := registry.Register(mock.Definition()); err != nil {
 		t.Fatal(err)
 	}
-	manager, err := execution.NewDurableManager(ctx, execution.DefaultConfig(), registry, store)
+	manager, err := execution.NewManager(ctx, execution.DefaultConfig(), registry, store)
 	if err != nil {
 		t.Fatal(err)
 	}

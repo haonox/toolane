@@ -258,15 +258,7 @@ func TestV01ReturnedOutputIsBounded(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	m, err := NewManager(config, registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := m.Close(context.Background()); err != nil {
-			t.Errorf("close: %v", err)
-		}
-	})
+	m := newTestManagerWithRegistry(t, config, registry)
 	s := submit(t, m, Request{})
 	final := awaitState(t, m, s.ID, Failed)
 	if final.ErrorCode != "output_limit_exceeded" || !final.OutputTruncated || len(final.Stdout)+len(final.Stderr) != 32 || m.Stats().Running != 0 {

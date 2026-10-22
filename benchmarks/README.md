@@ -40,4 +40,4 @@ python3 benchmarks/run_real_tools.py \
 
 运行器会校验真实工具的输出，并将每份成功报告的 SHA-256 与独立账本核对。出现意外状态，或外部副作用缺失、重复时，实验会失败。`REPORT.md` 列出测试覆盖的边界。只有命令成功退出，才应保留其结果用于分析；失败的运行可能留下不完整的诊断文件。
 
-`run_http_service.py` 和 `http_service.py` 测量的是 Mock 任务，不能将其吞吐量直接与 Process 测试工具比较。当前 HTTP 服务只提供租户轮询调度；如需比较 FIFO，应使用内部调度器基准，并说明两者测量范围不同。
+`run_http_service.py` 和 `http_service.py` 测量的是 Mock 任务，不能将其吞吐量直接与 Process 测试工具比较。当前 HTTP 服务只提供租户轮询调度；如需比较 FIFO，可使用 `go run ./benchmarks/scheduler -out DIR`。该基准在输出目录的 `state/` 下为每次运行保留独立的 SQLite 状态目录，测量包含持久化开销，但不包含 HTTP 和 Process 执行路径。请使用新的输出目录，避免与已有实验混合。

@@ -66,8 +66,8 @@ func (m *Manager) SubmitWorkflow(ctx context.Context, req WorkflowRequest) (Work
 // SubmitWorkflowIdempotent scopes key to the trusted tenant and workflow
 // submission endpoint. A live equivalent key returns the original batch.
 func (m *Manager) SubmitWorkflowIdempotent(ctx context.Context, req WorkflowRequest, key string) (WorkflowSnapshot, error) {
-	if m.store == nil || key == "" {
-		return WorkflowSnapshot{}, errors.New("idempotent workflow submission requires a durable manager and nonempty key")
+	if key == "" {
+		return WorkflowSnapshot{}, errors.New("idempotent workflow submission requires a nonempty key")
 	}
 	return m.submitWorkflow(ctx, req, key)
 }
@@ -132,10 +132,8 @@ func (m *Manager) submitWorkflow(ctx context.Context, req WorkflowRequest, key s
 	} else if len(req.Nodes) > m.config.TenantPendingLimit {
 		return WorkflowSnapshot{}, ErrTenantQueueFull
 	}
-	if m.store != nil {
-		if err := m.pruneDurableLocked(len(req.Nodes)); err != nil {
-			return WorkflowSnapshot{}, err
-		}
+	if err := m.pruneDurableLocked(len(req.Nodes)); err != nil {
+		return WorkflowSnapshot{}, err
 	}
 	now := time.Now().UTC()
 	w := &workflow{id: workflowID, tenantID: tenantID, state: Running, createdAt: now, remaining: len(req.Nodes)}
@@ -151,16 +149,14 @@ func (m *Manager) submitWorkflow(ctx context.Context, req WorkflowRequest, key s
 			w.nodes[parent].dependents = append(w.nodes[parent].dependents, w.nodes[i])
 		}
 	}
-	if m.store != nil {
-		persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		oldID, reused, err := m.createStoredWorkflowLocked(persistCtx, req, prepared, w, key, normalizedRequest)
-		if err != nil {
-			return WorkflowSnapshot{}, err
-		}
-		if reused {
-			return m.getWorkflowLocked(oldID)
-		}
+	persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	oldID, reused, err := m.createStoredWorkflowLocked(persistCtx, req, prepared, w, key, normalizedRequest)
+	if err != nil {
+		return WorkflowSnapshot{}, err
+	}
+	if reused {
+		return m.getWorkflowLocked(oldID)
 	}
 	m.workflows[workflowID] = w
 	for _, r := range w.nodes {
@@ -280,9 +276,6 @@ func (m *Manager) GetWorkflow(id string) (WorkflowSnapshot, error) {
 func (m *Manager) getWorkflowLocked(id string) (WorkflowSnapshot, error) {
 	w, ok := m.workflows[id]
 	if !ok {
-		if m.store == nil {
-			return WorkflowSnapshot{}, ErrNotFound
-		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		stored, err := m.store.GetWorkflow(ctx, id)
@@ -304,14 +297,12 @@ func (m *Manager) CancelWorkflow(id string) (WorkflowSnapshot, error) {
 	w, ok := m.workflows[id]
 	if !ok {
 		m.mu.Unlock()
-		if m.store != nil {
-			snapshot, err := m.GetWorkflow(id)
-			if err == nil && snapshot.FinishedAt != nil {
-				return snapshot, nil
-			}
-			if err != nil {
-				return WorkflowSnapshot{}, err
-			}
+		snapshot, err := m.GetWorkflow(id)
+		if err == nil && snapshot.FinishedAt != nil {
+			return snapshot, nil
+		}
+		if err != nil {
+			return WorkflowSnapshot{}, err
 		}
 		return WorkflowSnapshot{}, ErrNotFound
 	}

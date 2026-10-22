@@ -97,11 +97,7 @@ func (a *API) streamExecution(w http.ResponseWriter, r *http.Request, p principa
 	defer release()
 	// Subscribe first. A transition committed before this point is in the
 	// replay; one committed after it wakes the coalescing notification.
-	wake, unsubscribe, err := a.manager.SubscribeEvents(id)
-	if err != nil {
-		a.managerError(w, r, err)
-		return
-	}
+	wake, unsubscribe := a.manager.SubscribeEvents(id)
 	defer unsubscribe()
 	first, last, remaining, err := a.manager.EventBounds(r.Context(), id, after)
 	if err != nil {

@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/haonox/toolane/internal/store/sqlite"
 	"github.com/haonox/toolane/internal/tool"
 )
 
@@ -25,12 +27,23 @@ func testManager(t *testing.T, config Config, execute func(context.Context, json
 	}); err != nil {
 		t.Fatal(err)
 	}
-	m, err := NewManager(config, registry)
+	return newTestManagerWithRegistry(t, config, registry)
+}
+
+func newTestManagerWithRegistry(t *testing.T, config Config, registry *tool.Registry) *Manager {
+	t.Helper()
+	store := openDurableStore(t, filepath.Join(t.TempDir(), "state"))
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	m, err := NewManager(context.Background(), config, registry, store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := m.Close(ctx); err != nil {
 			t.Errorf("close manager: %v", err)
@@ -284,15 +297,7 @@ func TestToolPolicyNarrowsAdmissionDefaultsAndResult(t *testing.T) {
 		}
 	}
 	config := DefaultConfig()
-	m, err := NewManager(config, registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := m.Close(context.Background()); err != nil {
-			t.Errorf("close: %v", err)
-		}
-	})
+	m := newTestManagerWithRegistry(t, config, registry)
 	for _, req := range []Request{
 		{Tool: "strict", QueueTimeout: 300 * time.Millisecond},
 		{Tool: "strict", ExecutionTimeout: time.Second},
@@ -345,6 +350,8 @@ func TestToolPolicyClipsInheritedDefaultsAndRejectsGlobalOverrun(t *testing.T) {
 		}
 	}
 	config := DefaultConfig()
+	store := openDurableStore(t, filepath.Join(t.TempDir(), "state"))
+	defer store.Close()
 	for _, policy := range []tool.Policy{
 		{MaxQueueTimeout: config.MaxQueueTimeout + time.Second},
 		{DefaultRunTimeout: config.MaxRunTimeout + time.Second},
@@ -356,7 +363,7 @@ func TestToolPolicyClipsInheritedDefaultsAndRejectsGlobalOverrun(t *testing.T) {
 		if err := registry.Register(definition(policy)); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := NewManager(config, registry); err == nil {
+		if _, err := newManager(config, registry, store); err == nil {
 			t.Fatalf("policy above global limit accepted: %+v", policy)
 		}
 	}
@@ -368,15 +375,7 @@ func TestToolPolicyClipsInheritedDefaultsAndRejectsGlobalOverrun(t *testing.T) {
 	})); err != nil {
 		t.Fatal(err)
 	}
-	m, err := NewManager(config, registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := m.Close(context.Background()); err != nil {
-			t.Errorf("close: %v", err)
-		}
-	})
+	m := newTestManagerWithRegistry(t, config, registry)
 	s := submit(t, m, Request{Tool: "sample"})
 	if s.QueueTimeout != time.Second || s.ExecutionTimeout != time.Second || s.OutputLimitBytes != 16 {
 		t.Fatalf("inherited defaults did not fit tool maximum: %+v", s)
@@ -387,6 +386,7 @@ func TestToolPolicyClipsInheritedDefaultsAndRejectsGlobalOverrun(t *testing.T) {
 func TestTerminalRetention(t *testing.T) {
 	config := DefaultConfig()
 	config.RetainedResults = 1
+	config.DurableRecordLimit = 1
 	m := testManager(t, config, func(context.Context, json.RawMessage) (json.RawMessage, error) {
 		return json.RawMessage(`{"ok":true}`), nil
 	})
@@ -453,21 +453,13 @@ func TestOutputLimitAndUserCancelKeepFirstStopReason(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			m, err := NewManager(DefaultConfig(), registry)
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() {
-				if err := m.Close(context.Background()); err != nil {
-					t.Errorf("close: %v", err)
-				}
-			})
+			m := newTestManagerWithRegistry(t, DefaultConfig(), registry)
 			s := submit(t, m, Request{Tool: "output"})
 			<-started
 			if tc.limitFirst {
 				<-limitCommitted
 			}
-			_, err = m.Cancel(s.ID)
+			_, err := m.Cancel(s.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -494,7 +486,8 @@ func TestUnconfirmedStopKeepsReservationAndHaltsAdmission(t *testing.T) {
 	config := DefaultConfig()
 	config.Workers = 1
 	config.MaxErrorMessageBytes = 32
-	m, err := NewManager(config, registry)
+	store := openDurableStore(t, filepath.Join(t.TempDir(), "state"))
+	m, err := NewManager(context.Background(), config, registry, store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -524,5 +517,8 @@ func TestUnconfirmedStopKeepsReservationAndHaltsAdmission(t *testing.T) {
 	defer cancel()
 	if err := m.Close(ctx); !errors.Is(err, ErrStopUnconfirmed) {
 		t.Fatalf("close with unresolved process = %v", err)
+	}
+	if err := store.Close(); !errors.Is(err, sqlite.ErrRuntimeOwned) {
+		t.Fatalf("store closed while stop is unconfirmed: %v", err)
 	}
 }

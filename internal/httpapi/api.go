@@ -1,4 +1,4 @@
-// Package httpapi exposes a tenant-scoped JSON API over a durable Manager.
+// Package httpapi exposes a tenant-scoped JSON API over the execution Manager.
 package httpapi
 
 import (

@@ -21,7 +21,7 @@ func TestDurableOutputEventCapPreservesTerminal(t *testing.T) {
 	})
 	config := DefaultConfig()
 	config.MaxOutputBytes = len(output)
-	m, err := NewDurableManager(ctx, config, registry, store)
+	m, err := NewManager(ctx, config, registry, store)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/haonox/toolane/internal/execution"
 	"github.com/haonox/toolane/internal/executor/process"
+	"github.com/haonox/toolane/internal/store/sqlite"
 	"github.com/haonox/toolane/internal/tool"
 )
 
@@ -95,7 +97,21 @@ func processManager(t *testing.T, mode, readyFile string, config execution.Confi
 	if err := registry.Register(def); err != nil {
 		t.Fatal(err)
 	}
-	m, err := execution.NewManager(config, registry)
+	return newProcessTestManager(t, config, registry)
+}
+
+func newProcessTestManager(t *testing.T, config execution.Config, registry *tool.Registry) *execution.Manager {
+	t.Helper()
+	store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	m, err := execution.NewManager(context.Background(), config, registry, store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,15 +326,7 @@ func TestStartFailureDoesNotConsumeSlot(t *testing.T) {
 	if err := registry.Register(def); err != nil {
 		t.Fatal(err)
 	}
-	m, err := execution.NewManager(execution.DefaultConfig(), registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := m.Close(context.Background()); err != nil {
-			t.Errorf("close: %v", err)
-		}
-	})
+	m := newProcessTestManager(t, execution.DefaultConfig(), registry)
 	for range 20 {
 		s, err := m.Submit(context.Background(), execution.Request{Tool: "missing"})
 		if err != nil {
@@ -335,48 +343,50 @@ func TestStartFailureDoesNotConsumeSlot(t *testing.T) {
 func TestRepeatedCancelAndShutdownReleaseProcesses(t *testing.T) {
 	beforeGoroutines := runtime.NumGoroutine()
 	for i := range 8 {
-		ready := t.TempDir() + "/ready"
-		m := processManager(t, "sleep", ready, execution.DefaultConfig())
-		s := submitProcess(t, m, 0)
-		awaitFile(t, ready)
-		data, err := os.ReadFile(ready)
-		if err != nil {
-			t.Fatal(err)
-		}
-		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if i%2 == 0 {
-			stopping, err := m.Cancel(s.ID)
-			if err != nil || stopping.State != execution.Cancelling {
-				t.Fatalf("cancel iteration %d: %+v, %v", i, stopping, err)
+		t.Run(fmt.Sprintf("cycle-%d", i), func(t *testing.T) {
+			ready := t.TempDir() + "/ready"
+			m := processManager(t, "sleep", ready, execution.DefaultConfig())
+			s := submitProcess(t, m, 0)
+			awaitFile(t, ready)
+			data, err := os.ReadFile(ready)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if final := awaitProcess(t, m, s.ID); final.State != execution.Cancelled {
-				t.Fatalf("cancel iteration %d: %+v", i, final)
+			pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+			if err != nil {
+				t.Fatal(err)
 			}
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		if err := m.Close(ctx); err != nil {
+			if i%2 == 0 {
+				stopping, err := m.Cancel(s.ID)
+				if err != nil || stopping.State != execution.Cancelling {
+					t.Fatalf("cancel iteration %d: %+v, %v", i, stopping, err)
+				}
+				if final := awaitProcess(t, m, s.ID); final.State != execution.Cancelled {
+					t.Fatalf("cancel iteration %d: %+v", i, final)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			if err := m.Close(ctx); err != nil {
+				cancel()
+				t.Fatal(err)
+			}
 			cancel()
-			t.Fatal(err)
-		}
-		cancel()
-		if final, err := m.Get(s.ID); err != nil || final.State != execution.Cancelled {
-			t.Fatalf("shutdown iteration %d: %+v, %v", i, final, err)
-		}
-		if stats := m.Stats(); stats.Running != 0 || stats.Queued != 0 {
-			t.Fatalf("iteration %d retained a slot: %+v", i, stats)
-		}
-		deadline := time.NewTimer(2 * time.Second)
-		for processStillAlive(pid) {
-			select {
-			case <-time.After(10 * time.Millisecond):
-			case <-deadline.C:
-				t.Fatalf("iteration %d left process %d alive", i, pid)
+			if final, err := m.Get(s.ID); err != nil || final.State != execution.Cancelled {
+				t.Fatalf("shutdown iteration %d: %+v, %v", i, final, err)
 			}
-		}
-		deadline.Stop()
+			if stats := m.Stats(); stats.Running != 0 || stats.Queued != 0 {
+				t.Fatalf("iteration %d retained a slot: %+v", i, stats)
+			}
+			deadline := time.NewTimer(2 * time.Second)
+			for processStillAlive(pid) {
+				select {
+				case <-time.After(10 * time.Millisecond):
+				case <-deadline.C:
+					t.Fatalf("iteration %d left process %d alive", i, pid)
+				}
+			}
+			deadline.Stop()
+		})
 	}
 	afterGoroutines := runtime.NumGoroutine()
 	if afterGoroutines > beforeGoroutines+8 {

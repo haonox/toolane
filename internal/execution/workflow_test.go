@@ -32,18 +32,7 @@ func workflowManager(t *testing.T, config Config, execute func(context.Context, 
 	}); err != nil {
 		t.Fatal(err)
 	}
-	m, err := NewManager(config, registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := m.Close(ctx); err != nil {
-			t.Errorf("close workflow manager: %v", err)
-		}
-	})
-	return m
+	return newTestManagerWithRegistry(t, config, registry)
 }
 
 func workflowNode(id string, dependencies ...string) WorkflowNode {
@@ -278,6 +267,7 @@ func TestWorkflowBlockedNodeTimeoutSkipsDescendant(t *testing.T) {
 func TestWorkflowRetentionEvictsWholeCompletedWorkflow(t *testing.T) {
 	config := DefaultConfig()
 	config.RetainedResults = 3
+	config.DurableRecordLimit = 3
 	m := workflowManager(t, config, func(context.Context, string) error { return nil })
 	s, err := m.SubmitWorkflow(context.Background(), WorkflowRequest{Nodes: []WorkflowNode{workflowNode("a"), workflowNode("b", "a")}})
 	if err != nil {

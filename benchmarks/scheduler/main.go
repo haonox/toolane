@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/haonox/toolane/internal/execution"
+	"github.com/haonox/toolane/internal/store/sqlite"
 	"github.com/haonox/toolane/internal/tool"
 )
 
@@ -83,6 +84,7 @@ func experiment(out string, repetitions int, seed int64) error {
 		Seed        int64          `json:"seed"`
 		Scenarios   map[string]int `json:"scenario_tasks"`
 		ArrivalMode string         `json:"arrival_mode"`
+		StateStore  string         `json:"state_store"`
 	}{
 		GeneratedAt: time.Now().UTC(), GoVersion: runtime.Version(), GOOS: runtime.GOOS, GOARCH: runtime.GOARCH,
 		NumCPU: runtime.NumCPU(), GOMAXPROCS: runtime.GOMAXPROCS(0), Workers: config.Workers,
@@ -90,6 +92,7 @@ func experiment(out string, repetitions int, seed int64) error {
 		TenantQueue: config.TenantPendingLimit, Repetitions: repetitions, Seed: seed,
 		Scenarios:   map[string]int{"short": 72, "long": 72, "mixed": 72, "burst": 72},
 		ArrivalMode: "sequential grouped submissions while executor start gate is closed; all accepted work then released together",
+		StateStore:  "sqlite; one retained state directory per run",
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
@@ -112,7 +115,7 @@ func experiment(out string, repetitions int, seed int64) error {
 		for repeat := 1; repeat <= repetitions; repeat++ {
 			for _, mode := range []execution.SchedulerMode{execution.SchedulerFIFO, execution.SchedulerRoundRobin} {
 				config.Scheduler = mode
-				rows, err := run(config, scenario, mode, repeat, input)
+				rows, err := run(out, config, scenario, mode, repeat, input)
 				if err != nil {
 					return fmt.Errorf("%s repetition %d %s: %w", scenario, repeat, mode, err)
 				}
@@ -159,7 +162,7 @@ func workload(name string, seed int64) []task {
 	return result
 }
 
-func run(config execution.Config, scenario string, mode execution.SchedulerMode, repetition int, input []task) (rows []row, retErr error) {
+func run(out string, config execution.Config, scenario string, mode execution.SchedulerMode, repetition int, input []task) (rows []row, retErr error) {
 	gate := make(chan struct{})
 	registry := tool.NewRegistry()
 	if err := registry.Register(tool.Definition{
@@ -196,7 +199,20 @@ func run(config execution.Config, scenario string, mode execution.SchedulerMode,
 	}); err != nil {
 		return nil, err
 	}
-	m, err := execution.NewManager(config, registry)
+	stateRoot := filepath.Join(out, "state")
+	if err := os.MkdirAll(stateRoot, 0700); err != nil {
+		return nil, err
+	}
+	stateDir := filepath.Join(stateRoot, fmt.Sprintf("%s-r%d-%s", scenario, repetition, mode))
+	if err := os.Mkdir(stateDir, 0700); err != nil {
+		return nil, err
+	}
+	store, err := sqlite.Open(context.Background(), stateDir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { retErr = errors.Join(retErr, store.Close()) }()
+	m, err := execution.NewManager(context.Background(), config, registry, store)
 	if err != nil {
 		return nil, err
 	}

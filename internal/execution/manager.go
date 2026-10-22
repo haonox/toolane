@@ -234,23 +234,15 @@ type Manager struct {
 	workers            sync.WaitGroup
 }
 
-// NewManager freezes the registry and starts a fixed worker pool plus one queue
-// deadline monitor. Call Close to stop them.
-func NewManager(config Config, registry *tool.Registry) (*Manager, error) {
-	m, err := newManager(config, registry, nil)
-	if err != nil {
-		return nil, err
-	}
-	m.startWorkers()
-	return m, nil
-}
-
 func newManager(config Config, registry *tool.Registry, store *sqlite.Store) (*Manager, error) {
 	if err := config.validate(); err != nil {
 		return nil, err
 	}
 	if registry == nil {
 		return nil, errors.New("nil tool registry")
+	}
+	if store == nil {
+		return nil, errors.New("nil execution store")
 	}
 	definitions := registry.Snapshot()
 	policies := make(map[string]effectivePolicy, len(definitions))
@@ -280,18 +272,13 @@ func newManager(config Config, registry *tool.Registry, store *sqlite.Store) (*M
 
 func (m *Manager) startWorkers() {
 	config := m.config
-	count := config.Workers + 1
-	if m.store != nil {
-		count++
-	}
+	count := config.Workers + 2
 	m.workers.Add(count)
 	for range config.Workers {
 		go m.worker()
 	}
 	go m.expireQueued()
-	if m.store != nil {
-		go m.prunePeriodically()
-	}
+	go m.prunePeriodically()
 	go func() {
 		m.workers.Wait()
 		close(m.done)
@@ -304,11 +291,11 @@ func (m *Manager) Submit(ctx context.Context, req Request) (Snapshot, error) {
 	return m.submit(ctx, req, "")
 }
 
-// SubmitIdempotent is available only on a durable manager. The key is scoped
-// to the authenticated tenant and single-execution submission endpoint.
+// SubmitIdempotent scopes the key to the authenticated tenant and
+// single-execution submission endpoint.
 func (m *Manager) SubmitIdempotent(ctx context.Context, req Request, key string) (Snapshot, error) {
-	if m.store == nil || key == "" {
-		return Snapshot{}, errors.New("idempotent submission requires a durable manager and nonempty key")
+	if key == "" {
+		return Snapshot{}, errors.New("idempotent submission requires a nonempty key")
 	}
 	return m.submit(ctx, req, key)
 }
@@ -327,23 +314,20 @@ func (m *Manager) submit(ctx context.Context, req Request, key string) (Snapshot
 	if err := m.admissionError(ctx); err != nil {
 		return Snapshot{}, err
 	}
-	var normalizedRequest []byte
-	if m.store != nil {
-		normalizedRequest, err = encodeNormalizedRequest(prepared)
+	normalizedRequest, err := encodeNormalizedRequest(prepared)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if key != "" {
+		oldID, found, err := m.store.ResolveIdempotency(ctx, prepared.request.TenantID, executionEndpoint, key, normalizedRequest)
 		if err != nil {
+			if !errors.Is(err, sqlite.ErrIdempotencyConflict) && ctx.Err() == nil {
+				m.haltStoreLocked(err)
+			}
 			return Snapshot{}, err
 		}
-		if key != "" {
-			oldID, found, err := m.store.ResolveIdempotency(ctx, prepared.request.TenantID, executionEndpoint, key, normalizedRequest)
-			if err != nil {
-				if !errors.Is(err, sqlite.ErrIdempotencyConflict) && ctx.Err() == nil {
-					m.haltStoreLocked(err)
-				}
-				return Snapshot{}, err
-			}
-			if found {
-				return m.getLocked(oldID)
-			}
+		if found {
+			return m.getLocked(oldID)
 		}
 	}
 	if m.pending >= m.config.QueueCapacity {
@@ -352,25 +336,21 @@ func (m *Manager) submit(ctx context.Context, req Request, key string) (Snapshot
 	if state := m.tenants[prepared.request.TenantID]; state != nil && state.pending >= m.config.TenantPendingLimit {
 		return Snapshot{}, ErrTenantQueueFull
 	}
-	if m.store != nil {
-		if err := m.pruneDurableLocked(1); err != nil {
-			return Snapshot{}, err
-		}
+	if err := m.pruneDurableLocked(1); err != nil {
+		return Snapshot{}, err
 	}
 	now := time.Now().UTC()
 	r := prepared.makeRecord(id, "", "", now, true)
-	if m.store != nil {
-		// Once admission begins, its database transaction must finish even if
-		// the submitting client disconnects. A retry can resolve the key.
-		persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		oldID, reused, err := m.createStoredExecutionLocked(persistCtx, r, normalizedRequest, key)
-		if err != nil {
-			return Snapshot{}, err
-		}
-		if reused {
-			return m.getLocked(oldID)
-		}
+	// Once admission begins, its database transaction must finish even if
+	// the submitting client disconnects. A retry can resolve the key.
+	persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	oldID, reused, err := m.createStoredExecutionLocked(persistCtx, r, normalizedRequest, key)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if reused {
+		return m.getLocked(oldID)
 	}
 	m.records[id] = r
 	m.queue = append(m.queue, r)
@@ -505,9 +485,6 @@ func (m *Manager) Get(id string) (Snapshot, error) {
 func (m *Manager) getLocked(id string) (Snapshot, error) {
 	r, ok := m.records[id]
 	if !ok {
-		if m.store == nil {
-			return Snapshot{}, ErrNotFound
-		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		row, err := m.store.GetExecution(ctx, id)
@@ -532,18 +509,14 @@ func (m *Manager) Cancel(id string) (Snapshot, error) {
 	m.mu.Lock()
 	r, ok := m.records[id]
 	if !ok {
-		if m.store != nil {
-			snapshot, err := m.getLocked(id)
-			m.mu.Unlock()
-			if err == nil && snapshot.FinishedAt != nil {
-				return snapshot, nil
-			}
-			if err != nil {
-				return Snapshot{}, err
-			}
-			return Snapshot{}, ErrNotFound
-		}
+		snapshot, err := m.getLocked(id)
 		m.mu.Unlock()
+		if err == nil && snapshot.FinishedAt != nil {
+			return snapshot, nil
+		}
+		if err != nil {
+			return Snapshot{}, err
+		}
 		return Snapshot{}, ErrNotFound
 	}
 	var cancel context.CancelFunc

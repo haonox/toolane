@@ -28,14 +28,16 @@ flowchart LR
 
 ## 快速开始
 
-需要 **Linux 和 Go 1.27.1**。克隆仓库后运行演示：
+需要 **Linux 和 Go 1.27.1**。克隆仓库后，为演示指定本机绝对状态目录：
 
 ```bash
 git clone https://github.com/haonox/toolane.git
 cd toolane
-go run ./cmd/toolane          # Mock 任务
-go run ./cmd/toolane process  # 可信本地进程任务
+go run ./cmd/toolane demo mock --state-dir /absolute/private/toolane-mock-state
+go run ./cmd/toolane demo process --state-dir /absolute/private/toolane-process-state
 ```
+
+演示任务写入各自的 SQLite 状态目录，退出后仍保留记录。通过接口查询历史记录时，使用下方服务并配置固定的 `state_dir`。
 
 ### 启动 HTTP 服务
 
