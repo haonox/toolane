@@ -46,22 +46,3 @@ func TestRegistryRejectsInvalidToolPolicy(t *testing.T) {
 		}
 	}
 }
-
-func TestRegistryRejectsPartialSandboxReservation(t *testing.T) {
-	for _, resources := range []Resources{
-		{CPUMilli: 1000},
-		{MemoryBytes: 256 * 1024 * 1024},
-		{CPUMilli: -1, MemoryBytes: 1},
-	} {
-		r := NewRegistry()
-		if err := r.Register(Definition{
-			Name: "sample", Resources: resources,
-			Validate: func(json.RawMessage) error { return nil },
-			Execute: func(context.Context, json.RawMessage, RunOptions) (Outcome, error) {
-				return Outcome{}, nil
-			},
-		}); err == nil {
-			t.Fatalf("invalid reservation accepted: %+v", resources)
-		}
-	}
-}

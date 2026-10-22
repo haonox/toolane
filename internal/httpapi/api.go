@@ -585,7 +585,7 @@ func (a *API) managerError(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, r, http.StatusRequestTimeout, "request_cancelled", "request ended before admission")
 	case errors.Is(err, execution.ErrArgumentsTooLarge):
 		writeError(w, r, http.StatusRequestEntityTooLarge, "arguments_too_large", "tool arguments exceed limit")
-	case errors.Is(err, execution.ErrInvalidRequest), errors.Is(err, execution.ErrAgentIDTooLarge), errors.Is(err, execution.ErrTenantIDTooLarge), errors.Is(err, execution.ErrSandboxBudgetExceeded):
+	case errors.Is(err, execution.ErrInvalidRequest), errors.Is(err, execution.ErrAgentIDTooLarge), errors.Is(err, execution.ErrTenantIDTooLarge):
 		writeError(w, r, http.StatusBadRequest, "invalid_request", "request validation failed")
 	default:
 		writeError(w, r, http.StatusInternalServerError, "internal_error", "internal service error")

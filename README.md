@@ -4,14 +4,14 @@
 
 [架构与故障语义](docs/architecture.md) · [真实工具实验与复现](benchmarks/README.md)
 
-Linux · Go 1.27.1 · SQLite · HTTP + SSE · 可选 Docker 沙箱 · [Apache-2.0](LICENSE)
+Linux · Go 1.27.1 · SQLite · HTTP + SSE · [Apache-2.0](LICENSE)
 
 ## 特性
 
 - **有界调度**：固定 Worker、全局和租户容量限制、租户轮询调度、排队超时与取消。
 - **工作流**：原子提交静态 DAG；失败节点的下游跳过，独立分支继续执行。
-- **三种执行后端**：Mock 用于开发和测试；Process 仅运行服务端注册的可信程序；Docker 使用固定镜像运行受限 Shell 脚本。
-- **持久化与恢复**：SQLite 保存任务、事件和幂等键；重启后续调未认领任务，已认领任务标为结果未知的 `interrupted`。Docker 资源会执行恢复清理；强制杀死服务时，可信 Process 子进程可能继续运行。
+- **执行后端**：Mock 用于开发和测试；Process 仅运行服务端注册的可信程序。
+- **持久化与恢复**：SQLite 保存任务、事件和幂等键；重启后续调未认领任务，已认领任务标为结果未知的 `interrupted`。强制杀死服务时，可信 Process 子进程可能继续运行。
 - **本地服务接口**：Token 映射租户与工具权限，提供提交、查询、取消、SSE 事件、健康检查和可选管理指标。
 
 ```mermaid
@@ -22,14 +22,13 @@ flowchart LR
     Manager --> Executor{Executor}:::box
     Executor --> Mock[Mock]:::box
     Executor --> Process[Trusted Process]:::box
-    Executor --> Docker[Docker Sandbox]:::box
 
     classDef box fill:#f8f9fa,stroke:#333,stroke-width:1.5px,rounded:false
 ```
 
 ## 快速开始
 
-需要 **Linux 和 Go 1.27.1**。克隆仓库后，可以先运行不依赖 Docker 的演示：
+需要 **Linux 和 Go 1.27.1**。克隆仓库后运行演示：
 
 ```bash
 git clone https://github.com/haonox/toolane.git
@@ -61,7 +60,7 @@ chmod 600 /absolute/private/server.json
 go run ./cmd/toolane serve --config /absolute/private/server.json
 ```
 
-服务只接受回环地址；状态目录会以私有权限创建，已有目录也必须仅所有者可访问。`/readyz` 在存储及资源恢复完成后才返回就绪。可在配置中加入 `"metrics_listen": "127.0.0.1:9090"`，从独立的本地端口读取 `GET /metrics`。
+服务只接受回环地址；状态目录会以私有权限创建，已有目录也必须仅所有者可访问。`/readyz` 在存储恢复完成后才返回就绪。可在配置中加入 `"metrics_listen": "127.0.0.1:9090"`，从独立的本地端口读取 `GET /metrics`。
 
 提交一个 Mock 任务，将下方 Token 替换为配置中的值：
 
@@ -127,30 +126,9 @@ python3 examples/agent_bridge.py invoke --call-id demo-call-1 \
 
 `Idempotency-Key` 用于同一租户请求的重复提交，不保证外部副作用恰好发生一次。服务被强制杀死后，Process 子进程可能继续运行并产生副作用；重启时原任务会显示为 `interrupted`，表示**执行结果未知**。管理员应核查工具进程及其外部副作用后再决定是否重试。正常取消和超时会尝试终止进程组，但可信程序自行脱离进程组时，仍需由管理员处理。
 
-## Docker 执行
+## 旧 Docker 部署迁移
 
-使用 Docker 后端时，服务管理员须先在本机准备镜像，并在配置中固定**镜像标签、SHA-256 digest 和稳定的实例 ID**。以下是可独立使用的 Docker 服务配置，测试镜像为 Alpine 3.24.2：
-
-```json
-{
-  "listen": "127.0.0.1:8080",
-  "state_dir": "/absolute/private/toolane-state",
-  "docker": {
-    "image_tag": "alpine:3.24.2",
-    "image_digest": "sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6",
-    "instance_id": "local"
-  },
-  "tokens": [
-    {
-      "token": "replace-with-a-private-random-token",
-      "tenant_id": "local",
-      "tools": ["sandbox.shell"]
-    }
-  ]
-}
-```
-
-与前面的 HTTP 配置相同，先生成私密 Token，将配置写入仅自己可读的文件，再用 `serve --config` 启动。服务启动时先回收本实例的残留容器并检查 Docker 隔离条件。容器默认无网络，以非 root 身份运行，使用只读根目录、有界工作区及 CPU/内存限制。请求不能选择镜像、挂载、网络或特权参数。运行服务的用户需要有访问 Docker daemon 的权限。
+P2 已移除 Docker 后端及 `sandbox.shell`。旧配置中的 `docker` 字段会被拒绝；带有 `.docker-instance-id` 的旧状态目录也会拒绝启动，以免新版遗漏容器清理。迁移步骤和取舍见[设计记录](docs/docker-removal.md)。
 
 ## 开发与验证
 
@@ -163,34 +141,20 @@ python3 -m unittest discover -s tests/fixtures -p 'test_*.py'
 python3 -m unittest discover -s benchmarks -p 'test_*.py'
 ```
 
-真实 Docker 集成测试需要本地 daemon 权限和已拉取的固定镜像：
-
-```bash
-go test -tags=integration ./cmd/toolane ./tests/integration/... -count=1
-```
-
-如果 Docker 仅允许通过 `sudo` 访问，请先以普通用户运行 `go mod download`，再复用该用户的模块缓存：
-
-```bash
-sudo env PATH="$PATH" GOCACHE=/tmp/toolane-go-cache \
-  GOMODCACHE="$(go env GOMODCACHE)" GOPROXY=off \
-  go test -tags=integration ./cmd/toolane ./tests/integration/... -count=1
-```
-
 `benchmarks/` 包含调度基准、历史 Mock HTTP 负载脚本，以及新的 [真实 Process 工具实验脚本](benchmarks/README.md)。现有 [`benchmarks/results/`](benchmarks/results/) 是历史 Mock 结果；真实工具报告应由测试人员在其机器上用固定二进制和负载生成，不能用 Mock 或直接进程成绩代替。
 
 | 路径 | 内容 |
 | --- | --- |
 | `cmd/toolane/` | CLI 演示与本地 HTTP 服务 |
 | `internal/execution/` | 状态机、调度、工作流和恢复 |
-| `internal/executor/` | Mock、可信 Process 与 Docker 后端 |
+| `internal/executor/` | Mock 与可信 Process 后端 |
 | `internal/httpapi/`、`internal/store/sqlite/` | HTTP/SSE 接口与持久化 |
-| `examples/`、`benchmarks/`、`tests/integration/` | 调用示例、实验与真实容器测试 |
+| `examples/`、`benchmarks/`、`tests/fixtures/` | 调用示例、实验与真实工具测试 |
 
 欢迎通过 Issue 描述问题或提议改进；提交代码时请附上与改动相关的测试结果。
 
 ## 边界与许可证
 
-Toolane 是单机项目，不提供 LLM 推理、Agent 规划、多实例共享数据库或自动重试。Process 后端只适合可信程序；Docker 后端降低常见越权与资源滥用风险，不承诺抵御宿主内核漏洞。服务默认只监听本机；对外暴露时须自行配置受信任的 TLS 入口。
+Toolane 是单机项目，不提供 LLM 推理、Agent 规划、多实例共享数据库、自动重试或不可信代码隔离。Process 后端只适合可信程序。服务默认只监听本机；对外暴露时须自行配置受信任的 TLS 入口。
 
 本项目采用 [Apache License 2.0](LICENSE)。

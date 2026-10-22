@@ -25,7 +25,7 @@ func TestRecorderUsesFiniteLabelsAndCommittedTransitionDurations(t *testing.T) {
 	recorder.RecordChange(Change{BeforeState: "succeeded", AfterState: "succeeded", CreatedAt: created,
 		BeforeCleanup: "failed", AfterCleanup: "failed"})
 	var output bytes.Buffer
-	if err := recorder.WritePrometheus(&output, Gauges{Queued: 2, Running: 1, Residual: 3, Goroutines: 9}); err != nil {
+	if err := recorder.WritePrometheus(&output, Gauges{Queued: 2, Running: 1, Goroutines: 9}); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
@@ -37,7 +37,6 @@ func TestRecorderUsesFiniteLabelsAndCommittedTransitionDurations(t *testing.T) {
 		`toolane_execution_duration_seconds_sum 2`,
 		`toolane_cleanup_failures_total 1`,
 		`toolane_queued 2`,
-		`toolane_residual_containers 3`,
 		`toolane_goroutines 9`,
 	} {
 		if !strings.Contains(output.String(), want) {
@@ -46,5 +45,10 @@ func TestRecorderUsesFiniteLabelsAndCommittedTransitionDurations(t *testing.T) {
 	}
 	if strings.Contains(output.String(), "tenant-selected-label") {
 		t.Fatal("unbounded label appeared in metrics")
+	}
+	for _, removed := range []string{"toolane_residual_containers", "toolane_residual_blocked", "toolane_reserved_cpu_millicores", "toolane_reserved_memory_bytes"} {
+		if strings.Contains(output.String(), removed) {
+			t.Fatalf("removed Docker metric %q remains", removed)
+		}
 	}
 }

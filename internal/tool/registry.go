@@ -18,38 +18,7 @@ type RunOptions struct {
 	MaxOutputBytes   int
 	OnOutputLimit    func()
 	OnProcessStarted func(time.Time)
-	OnCleanupUpdate  func(status, message string)
-	// OnResourceCreated records a Docker container before it starts. A failure
-	// requires the executor to clean up the new container without starting it.
-	OnResourceCreated func(ResourceRef) error
-	SandboxResources  Resources
-	ExecutionID       string
-}
-
-// ResourceRef identifies a resource created for one execution. InstanceID is
-// the stable deployment owner used to find Docker containers after a crash.
-type ResourceRef struct {
-	Kind       string `json:"kind"`
-	ID         string `json:"id"`
-	InstanceID string `json:"instance_id"`
-}
-
-// ResourceDockerContainer identifies a Docker container owned by one run.
-const ResourceDockerContainer = "docker_container"
-
-// Resources is a server-owned sandbox reservation. Zero means the tool does
-// not reserve sandbox CPU or memory (for example, Mock or trusted Process).
-// Nonzero reservations require both fields to be positive.
-type Resources struct {
-	CPUMilli    int
-	MemoryBytes int64
-}
-
-func (r Resources) Validate() error {
-	if r.CPUMilli < 0 || r.MemoryBytes < 0 || (r.CPUMilli == 0) != (r.MemoryBytes == 0) {
-		return errors.New("sandbox CPU and memory reservations must both be positive or both zero")
-	}
-	return nil
+	ExecutionID      string
 }
 
 // Outcome reports executor facts. The execution manager alone decides the
@@ -62,8 +31,6 @@ type Outcome struct {
 	OutputTruncated  bool
 	ProcessStartedAt *time.Time
 	StopUnconfirmed  bool
-	CleanupStatus    string
-	CleanupError     string
 }
 
 // RunError gives an executor failure a stable code without coupling the
@@ -123,7 +90,6 @@ type Definition struct {
 	Description string
 	Parameters  json.RawMessage
 	Policy      Policy
-	Resources   Resources
 	Validate    func(json.RawMessage) error
 	Execute     func(context.Context, json.RawMessage, RunOptions) (Outcome, error)
 }
@@ -156,9 +122,6 @@ func (r *Registry) Register(def Definition) error {
 		return errors.New("tool requires name, validator and executor")
 	}
 	if err := def.Policy.validate(); err != nil {
-		return fmt.Errorf("tool %q: %w", def.Name, err)
-	}
-	if err := def.Resources.Validate(); err != nil {
 		return fmt.Errorf("tool %q: %w", def.Name, err)
 	}
 	r.mu.Lock()
