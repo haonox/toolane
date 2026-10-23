@@ -32,6 +32,7 @@ func (w streamWriter) Write(p []byte) (int, error) {
 	b := w.budget
 	b.mu.Lock()
 	n := len(p)
+	exceeded := n > b.remaining
 	if n > b.remaining {
 		n = b.remaining
 	}
@@ -41,12 +42,11 @@ func (w streamWriter) Write(p []byte) (int, error) {
 		b.stdout = append(b.stdout, p[:n]...)
 	}
 	b.remaining -= n
-	reached := b.remaining == 0
-	if reached {
+	if exceeded {
 		b.truncated = true
 	}
 	b.mu.Unlock()
-	if reached {
+	if exceeded {
 		b.once.Do(func() {
 			if b.onLimit != nil {
 				b.onLimit()

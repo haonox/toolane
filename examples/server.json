@@ -1,0 +1,48 @@
+{
+  "business_listen": "127.0.0.1:8080",
+  "metrics_listen": "127.0.0.1:9090",
+  "execution": {
+    "workers": 4,
+    "queue_capacity": 256,
+    "tenant_running_limit": 2,
+    "tenant_pending_limit": 64,
+    "retained_results": 1000
+  },
+  "tokens": [
+    {
+      "token": "local-demo-tenant-a-token-20261023",
+      "tenant_id": "demoA",
+      "tools": ["text.stats"]
+    },
+    {
+      "token": "local-demo-tenant-b-token-20261023",
+      "tenant_id": "demoB",
+      "tools": ["text.stats"]
+    }
+  ],
+  "process_tools": [
+    {
+      "name": "text.stats",
+      "description": "Count characters and words in text and return its SHA-256 hash.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string", "minLength": 1, "maxLength": 2000 }
+        },
+        "required": ["text"],
+        "additionalProperties": false
+      },
+      "executable": "/usr/bin/python3",
+      "directory": "/home/wenhao-liu/code/Toolane",
+      "environment": { "PYTHONDONTWRITEBYTECODE": "1" },
+      "args": [
+        { "literal": "/home/wenhao-liu/code/Toolane/examples/tools/text_stats.py" },
+        { "parameter": "text" },
+        { "execution_id": true }
+      ],
+      "run_timeout_ms": 5000,
+      "max_output_bytes": 8192,
+      "max_result_bytes": 8192
+    }
+  ]
+}

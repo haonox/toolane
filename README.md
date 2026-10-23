@@ -1,15 +1,71 @@
 # Toolane
 
-Toolane 是面向 Agent 工具调用的单机调度与执行服务。调用方选择已注册工具并提交参数；Toolane 校验请求、控制队列与租户配额、调用工具，并提供任务状态查询和取消接口。
+Toolane 是面向 Agent 工具调用的单机、多租户调度与运行管理服务。多个租户共用 Agent 服务时，大量工具调用可能同时涌入；Toolane 控制接收量和并发量，按租户公平调度，并跟踪每次调用直到产生最终状态和结果。工具的具体业务逻辑由服务端注册的工具程序实现。
 
 Linux · Go 1.27.1 · HTTP · [Apache-2.0](LICENSE)
+
+## 解决的问题与调用流程
+
+### Toolane 在 Function Calling 流程中的位置
+
+Agent 程序把工具定义和用户问题交给大模型。模型返回工具名、参数和模型侧的 `call_id`；Agent 程序再把工具调用提交给 Toolane。Toolane 负责接收、调度、执行已注册工具并提供最终状态和结果。Agent 程序取得结果后，使用 `call_id` 将工具结果交还模型，由模型继续回答或提出下一轮工具调用。
+
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant A as Agent 程序
+    participant M as 大模型
+    participant T as Toolane
+    participant P as 工具进程
+
+    U->>A: 提出问题
+    A->>M: 发送问题和可用工具定义
+    M-->>A: 工具名、参数、call_id
+    A->>T: 提交工具名和参数
+    T-->>A: 返回 execution_id
+    T->>P: 调度并执行工具
+    P-->>T: 返回执行结果
+    A->>T: 用 execution_id 查询最终状态和结果
+    T-->>A: 返回终态及结果或错误
+    A->>M: 用 call_id 回传工具结果
+    M-->>A: 生成回答，或继续提出工具调用
+    A-->>U: 返回回答
+```
+
+`call_id` 用于 Agent 程序向模型回传本次工具调用的结果；`execution_id` 用于向 Toolane 查询任务。Agent 程序负责保存两者的对应关系，并在任务尚未结束时继续查询。Toolane 不直接与大模型通信。
+
+### Toolane 内部的执行流程
+
+Agent 程序收到模型提出的工具调用后，向 Toolane 提交工具名和 JSON 参数。Toolane 校验租户权限、工具及参数，在全局队列和租户待处理容量内接收请求；容量耗尽时拒绝请求。已接收的任务进入有界队列，由固定数量的 Worker 按租户轮询并遵守每租户运行上限。Toolane 管理排队超时、执行超时、取消和输出限制，保存工具程序返回的结果或错误。
+
+```mermaid
+flowchart TD
+    A["Agent 程序提交工具调用<br/>POST /api/v1/executions"] --> B{"Token、工具权限与参数校验"}
+    B -- 未通过 --> R1["返回请求错误"]
+    B -- 通过 --> C{"全局与租户待处理容量"}
+    C -- 已满 --> R2["返回 429"]
+    C -- 可接收 --> D["创建 queued 任务<br/>返回 202 和 execution_id"]
+    D --> E["有界队列按租户轮询<br/>遵守每租户运行上限"]
+    E --> F{"排队期间超时或取消？"}
+    F -- 是 --> I["记录最终状态、结果或错误"]
+    F -- 否 --> G["Worker 领取任务：running"]
+    G --> H["调用已注册的可信工具程序<br/>管理超时、取消和输出限制"]
+    H --> I
+    D -. "Agent 持 execution_id 轮询 GET /api/v1/executions/{id}" .-> J{"任务是否结束？"}
+    I --> J
+    J -- 否，稍后继续查询 --> J
+    J -- 是 --> K["返回 succeeded、failed、timed_out 或 cancelled<br/>以及结果或错误"]
+    K --> L["Agent 程序关联模型 call_id<br/>将结果交还模型"]
+```
+
+提交成功只表示任务已被接收，结果通过后续查询取得，Toolane 当前不会主动推送结果。调度和配额按租户生效，`agent_id` 只是可选的任务标识，不参与调度。
 
 ## 核心能力
 
 - 固定 Worker 数、有界队列、租户轮询调度与每租户运行上限。
 - 排队超时、执行超时、取消、输出与结果大小限制。
 - Mock 工具用于学习和测试；Process 工具只运行服务端注册的可信程序。
-- Bearer Token 绑定租户和工具权限；服务监听本机回环地址，可另开端口提供管理指标。
+- Bearer Token 绑定租户和工具权限；业务与指标服务分别监听本机回环地址上的两个端口。
 
 [架构与执行语义](docs/architecture.md)
 
@@ -24,12 +80,31 @@ go run ./cmd/toolane demo process
 
 ```json
 {
-  "listen": "127.0.0.1:8080",
+  "business_listen": "127.0.0.1:8080",
+  "execution": {
+    "workers": 8,
+    "queue_capacity": 1024,
+    "tenant_running_limit": 2,
+    "tenant_pending_limit": 128,
+    "retained_results": 5000
+  },
   "tokens": [
     {"token": "replace-with-a-private-random-token", "tenant_id": "local", "tools": ["mock.delay"]}
   ]
 }
 ```
+
+`execution` 是可选的服务容量配置，示例数值仅用于展示格式。管理员可按机器资源和工具耗时调整：
+
+| 字段 | 作用 | 未填写时的默认值 |
+| --- | --- | ---: |
+| `workers` | 同时执行工具的 Worker 数 | 4 |
+| `queue_capacity` | 全局待处理任务数上限，不含运行中的任务 | 256 |
+| `tenant_running_limit` | 每租户同时运行的任务数上限 | 2 |
+| `tenant_pending_limit` | 每租户待处理任务数上限 | 64 |
+| `retained_results` | 内存中保留的终态任务条数上限 | 1000 |
+
+可以只填写需要覆盖的字段；所有配置值都必须是正整数，显式配置为零或负数会使服务启动失败。增大 `retained_results` 会增加内存占用，也不会使任务记录在服务重启后保留。
 
 ```bash
 chmod 600 /absolute/private/server.json
@@ -45,30 +120,31 @@ curl -sS http://127.0.0.1:8080/api/v1/executions \
   -d '{"tool":"mock.delay","arguments":{"delay_ms":100,"value":"hello"}}'
 ```
 
-响应包含 `execution_id`，可用 `GET /api/v1/executions/{id}` 查询。也可以运行只依赖 Python 标准库的[客户端示例](examples/python_client.py)。
+响应包含 `execution_id`，可用 `GET /api/v1/executions/{id}` 查询。下方的 [`agent_bridge.py`](examples/agent_bridge.py) 会自动完成提交和轮询。
 
 任务记录只在本次服务运行期间可查询。重新启动服务后，原执行 ID 不再可查询；重发请求会创建新任务。
 
-### 真实 Process 工具
+### 三文件端到端示例
 
-仓库提供 [`text.stats`](examples/tools/text_stats.py) 示例。配置生成器会注册工具并打印两个租户的 Token：
+- [`examples/server.json`](examples/server.json) 配置服务容量、两个演示租户及 `text.stats` Process 工具。
+- [`examples/tools/text_stats.py`](examples/tools/text_stats.py) 是被 Toolane 启动的工具程序，返回字符数、单词数和 SHA-256。
+- [`examples/agent_bridge.py`](examples/agent_bridge.py) 从 Toolane 获取公开工具定义，模拟一次模型 Function Calling，提交任务并轮询结果，最后打印带原始 `call_id` 的 `function_call_output`。它不会调用真实大模型。
 
-```bash
-demo_dir="$(mktemp -d)"
-python3 examples/make_process_config.py --config "$demo_dir/server.json"
-go run ./cmd/toolane serve --config "$demo_dir/server.json"
-```
-
-在另一个终端：
+`server.json` 中的 Python 路径和项目目录是当前工作区的绝对路径；复制仓库到别处时，先修改 `executable`、`directory` 和 `args[0].literal`。演示 Token 已写在文件中，只适合本机练习。第一个终端启动服务：
 
 ```bash
-export TOOLANE_TOKEN='上一步打印的租户 Token'
-python3 examples/agent_bridge.py describe
-python3 examples/agent_bridge.py invoke --call-id demo-call-1 \
-  --tool text.stats --arguments '{"text":"hello Toolane"}'
+chmod 600 examples/server.json
+go run ./cmd/toolane serve --config examples/server.json
 ```
 
-[`agent_bridge.py`](examples/agent_bridge.py) 演示工具描述、提交、轮询以及模型侧 `call_id` 与执行 ID 的映射。
+第二个终端模拟一次完整的工具调用：
+
+```bash
+export TOOLANE_TOKEN='local-demo-tenant-a-token-20261023'
+python3 examples/agent_bridge.py --text 'hello Toolane'
+```
+
+终端依次显示工具定义、模拟的模型调用、Toolane 接收的 `execution_id`、最终状态与结果，以及准备回传给模型的 `function_call_output`。其中 `call_id` 属于模型调用，`execution_id` 属于 Toolane 任务。
 
 管理员在 `process_tools` 中固定可执行文件、工作目录、环境变量、JSON Schema 和参数位置。参数位置只能使用固定值、必填字段或执行 ID；Toolane 直接构造参数数组，不经过 Shell。Process 工具成功退出时，标准输出必须是一个 JSON 值，它会成为任务结果。只应注册可信程序。
 
@@ -84,7 +160,7 @@ python3 examples/agent_bridge.py invoke --call-id demo-call-1 \
 | `POST` | `/api/v1/executions/{id}/cancel` | 取消任务 |
 | `GET` | `/healthz`、`/readyz` | 存活与就绪检查 |
 
-配置中可加入 `"metrics_listen": "127.0.0.1:9090"`，从独立本地端口读取 `GET /metrics`。服务向标准错误输出结构化 JSON 日志。
+服务始终启动业务和指标两个端口。`business_listen` 默认是 `127.0.0.1:8080`，`metrics_listen` 默认是 `127.0.0.1:9090`；管理员可在配置中指定其他本机回环地址和端口。指标端口提供 `GET /metrics`，服务向标准错误输出结构化 JSON 日志。任一端口无法监听时，服务启动失败。
 
 ## 代码与验证
 
@@ -96,13 +172,12 @@ python3 examples/agent_bridge.py invoke --call-id demo-call-1 \
 | `internal/executor/` | Mock 与可信 Process 执行 |
 | `internal/httpapi/` | Token 授权与 HTTP 接口 |
 | `internal/observability/` | 日志和指标 |
-| `examples/` | 本地调用示例 |
+| `examples/` | 三文件端到端 Function Calling 示例 |
 
 ```bash
 go test ./...
 go test -race ./...
 go vet ./...
-python3 -m unittest discover -s examples -p 'test_*.py'
 ```
 
 Toolane 不提供 LLM 推理、Agent 规划或不可信代码隔离。服务默认只监听本机；对外访问需自行配置受信任的 TLS 入口。

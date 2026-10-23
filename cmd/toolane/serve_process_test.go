@@ -33,7 +33,7 @@ func TestProcessHTTPHelper(t *testing.T) {
 	mode, value, id := args[0], args[1], args[2]
 	if mode == "slow" {
 		if readyFile := os.Getenv("TOOLANE_PROCESS_READY_FILE"); readyFile != "" {
-			_ = os.WriteFile(readyFile, []byte(fmt.Sprint(os.Getpid())), 0600)
+			_ = os.WriteFile(readyFile, fmt.Append(nil, os.Getpid()), 0600)
 		}
 		time.Sleep(1200 * time.Millisecond)
 		file, err := os.OpenFile(os.Getenv("TOOLANE_PROCESS_LEDGER"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
@@ -69,7 +69,7 @@ func processTestConfig(t *testing.T, dir, address string) string {
 			Args:         []processArgumentConfig{literal("-test.run=^TestProcessHTTPHelper$"), literal("--"), literal(mode), {Parameter: "value"}, {ExecutionID: true}},
 			RunTimeoutMS: 3000}
 	}
-	config := serverConfig{Listen: address,
+	config := serverConfig{BusinessListen: address, MetricsListen: "127.0.0.1:0",
 		ProcessTools: []serverProcessToolConfig{toolConfig("test.echo", "echo"), toolConfig("test.slow", "slow")},
 		Tokens: []httpapi.Token{{Value: "tenant-a-secret-123456", TenantID: "tenantA", Tools: []string{"test.echo"}},
 			{Value: "tenant-b-secret-123456", TenantID: "tenantB", Tools: []string{"test.echo", "test.slow"}}}}

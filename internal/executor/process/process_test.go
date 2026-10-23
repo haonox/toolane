@@ -26,6 +26,13 @@ func TestHelperProcess(t *testing.T) {
 	case "streams":
 		fmt.Fprint(os.Stdout, "stdout")
 		fmt.Fprint(os.Stderr, "stderr")
+	case "exact_limit", "one_over_limit":
+		fmt.Fprint(os.Stdout, strings.Repeat("x", 32))
+		count := 32
+		if os.Getenv("TOOLANE_TEST_MODE") == "one_over_limit" {
+			count++
+		}
+		fmt.Fprint(os.Stderr, strings.Repeat("y", count))
 	case "nonzero":
 		os.Exit(7)
 	case "flood":
@@ -192,6 +199,30 @@ func TestSharedOutputLimitStopsProcess(t *testing.T) {
 	}
 	if len(s.Stdout)+len(s.Stderr) != 64 || m.Stats().Running != 0 {
 		t.Fatalf("output budget or running slot: stdout=%d stderr=%d stats=%+v", len(s.Stdout), len(s.Stderr), m.Stats())
+	}
+}
+
+func TestSharedOutputLimitBoundary(t *testing.T) {
+	config := execution.DefaultConfig()
+	config.MaxOutputBytes = 64
+	for _, tc := range []struct {
+		mode      string
+		state     execution.State
+		truncated bool
+	}{
+		{mode: "exact_limit", state: execution.Succeeded},
+		{mode: "one_over_limit", state: execution.Failed, truncated: true},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			m := processManager(t, tc.mode, "", config)
+			s := awaitProcess(t, m, submitProcess(t, m, 0).ID)
+			if s.State != tc.state || s.OutputTruncated != tc.truncated || len(s.Stdout)+len(s.Stderr) != 64 || m.Stats().Running != 0 {
+				t.Fatalf("output limit boundary: %+v, stats=%+v", s, m.Stats())
+			}
+			if tc.truncated && s.ErrorCode != "output_limit_exceeded" {
+				t.Fatalf("output limit error code = %q", s.ErrorCode)
+			}
+		})
 	}
 }
 

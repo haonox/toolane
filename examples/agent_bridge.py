@@ -1,70 +1,126 @@
 #!/usr/bin/env python3
-"""Minimal Agent integration: discover tools and map a model call to Toolane."""
+"""Simulate one model function call through Toolane, without an LLM API key."""
 
 import argparse
+import ipaddress
 import json
-import math
 import os
+import re
 import sys
 import time
-
-from python_client import EXECUTION_ID, TERMINAL, ToolaneClient, ToolaneError
-
-
-def model_tool_definitions(client):
-    """Public descriptions suitable for an Agent's function-tool list."""
-    return [{"type": "function", **definition} for definition in client.list_tools()["tools"]]
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 
-def invoke_tool_call(client, call_id, name, arguments, wait_seconds=20):
-    """Return a call_id-matched output; never treat Toolane's ID as call_id."""
-    if not isinstance(arguments, dict):
-        raise ValueError("tool arguments must be a JSON object")
-    accepted = client.submit_tool(name, arguments)
-    execution_id = accepted.get("execution_id")
-    if not isinstance(execution_id, str) or not EXECUTION_ID.fullmatch(execution_id):
-        raise ToolaneError("accepted response has no valid execution ID")
-    deadline = time.monotonic() + wait_seconds
-    while True:
-        snapshot = client.get_execution(execution_id)
-        status = snapshot.get("status")
-        if status in TERMINAL:
-            if status == "succeeded":
-                payload = {"execution_id": execution_id, "result": snapshot.get("result")}
-            else:
-                payload = {"execution_id": execution_id, "status": status,
-                           "error_code": snapshot.get("error_code"),
-                           "error_message": snapshot.get("error_message")}
-            return {"call_id": call_id, "output": json.dumps(payload, ensure_ascii=False)}
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise ToolaneError(f"wait timed out; execution {execution_id} remains managed by Toolane")
-        time.sleep(min(0.2, remaining))
+TOOL_NAME = "text.stats"
+TERMINAL = {"succeeded", "failed", "timed_out", "cancelled"}
+EXECUTION_ID = re.compile(r"[0-9a-f]{32}\Z")
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
+class ToolaneClient:
+    def __init__(self, base_url, token):
+        parsed = urlsplit(base_url)
+        try:
+            local = parsed.hostname == "localhost" or ipaddress.ip_address(parsed.hostname).is_loopback
+        except (ValueError, TypeError):
+            local = False
+        if (parsed.scheme != "http" or not local or parsed.port is None or
+                parsed.username or parsed.password or parsed.path not in ("", "/") or
+                parsed.query or parsed.fragment):
+            raise ValueError("base URL must be a local HTTP origin with an explicit port")
+        if not token:
+            raise ValueError("set TOOLANE_TOKEN to a token from examples/server.json")
+        self.base_url = base_url.rstrip("/")
+        self.token = token
+        self.opener = build_opener(ProxyHandler({}), NoRedirect())
+
+    def request(self, method, path, body=None):
+        headers = {"Authorization": "Bearer " + self.token, "Accept": "application/json"}
+        data = None
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        request = Request(self.base_url + path, data=data, headers=headers, method=method)
+        try:
+            with self.opener.open(request, timeout=10) as response:
+                raw = response.read(2 * 1024 * 1024 + 1)
+        except HTTPError as error:
+            with error:
+                detail = json.loads(error.read(8192))
+            raise RuntimeError(f"Toolane HTTP {error.code}: {detail.get('code', 'unknown')}") from None
+        except URLError as error:
+            raise RuntimeError(f"cannot reach Toolane: {error.reason}") from None
+        if len(raw) > 2 * 1024 * 1024:
+            raise RuntimeError("Toolane response exceeds 2 MiB")
+        return json.loads(raw)
+
+
+def show(label, value):
+    print(f"{label}:")
+    print(json.dumps(value, ensure_ascii=False, indent=2))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:8080")
-    commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("describe", help="print public function-tool descriptions")
-    invoke = commands.add_parser("invoke", help="submit and wait for one model tool call")
-    invoke.add_argument("--call-id", required=True)
-    invoke.add_argument("--tool", required=True)
-    invoke.add_argument("--arguments", required=True, help="JSON object")
-    invoke.add_argument("--wait-seconds", type=float, default=20)
+    parser.add_argument("--text", default="hello Toolane")
+    parser.add_argument("--call-id", default="call_demo_1")
+    parser.add_argument("--wait-seconds", type=float, default=20)
     args = parser.parse_args()
+    if not args.call_id or not 0 < args.wait_seconds <= 300:
+        parser.error("call ID must be nonempty and wait time must be 0..300 seconds")
     try:
         client = ToolaneClient(args.base_url, os.environ.get("TOOLANE_TOKEN"))
-        if args.command == "describe":
-            print(json.dumps(model_tool_definitions(client), ensure_ascii=False, indent=2))
-            return 0
-        if not math.isfinite(args.wait_seconds) or args.wait_seconds <= 0:
-            raise ValueError("wait seconds must be finite and positive")
-        result = invoke_tool_call(client, args.call_id, args.tool, json.loads(args.arguments), args.wait_seconds)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
-    except (ToolaneError, ValueError, KeyError) as exc:
-        print(f"Agent bridge: {exc}", file=sys.stderr)
+
+        # These are the public definitions an Agent would provide to a model.
+        definitions = [{"type": "function", **item} for item in client.request("GET", "/api/v1/tools")["tools"]]
+        if not any(item["name"] == TOOL_NAME for item in definitions):
+            raise RuntimeError(f"this token cannot use {TOOL_NAME}")
+        show("1. Tools available to the model", definitions)
+
+        # This item stands in for a model response. No model API is called here.
+        model_call = {"type": "function_call", "call_id": args.call_id,
+                      "name": TOOL_NAME, "arguments": json.dumps({"text": args.text}, ensure_ascii=False)}
+        show("2. Simulated model function call", model_call)
+
+        accepted = client.request("POST", "/api/v1/executions", {
+            "agent_id": "example-agent", "tool": model_call["name"],
+            "arguments": json.loads(model_call["arguments"]),
+        })
+        execution_id = accepted.get("execution_id", "")
+        if not EXECUTION_ID.fullmatch(execution_id):
+            raise RuntimeError("Toolane did not return a valid execution ID")
+        show("3. Toolane accepted the execution", accepted)
+
+        deadline = time.monotonic() + args.wait_seconds
+        while True:
+            snapshot = client.request("GET", "/api/v1/executions/" + execution_id)
+            if snapshot["status"] in TERMINAL:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(f"wait timed out; execution {execution_id} remains in Toolane")
+            time.sleep(min(0.2, remaining))
+        show("4. Toolane final state and result", snapshot)
+
+        if snapshot["status"] == "succeeded":
+            payload = {"execution_id": execution_id, "result": snapshot.get("result")}
+        else:
+            payload = {"execution_id": execution_id, "status": snapshot["status"],
+                       "error_code": snapshot.get("error_code"),
+                       "error_message": snapshot.get("error_message")}
+        model_output = {"type": "function_call_output", "call_id": model_call["call_id"],
+                        "output": json.dumps(payload, ensure_ascii=False)}
+        show("5. Output the Agent would return to the model", model_output)
+        return 0 if snapshot["status"] == "succeeded" else 1
+    except (RuntimeError, ValueError, KeyError, json.JSONDecodeError) as error:
+        print(f"Agent bridge: {error}", file=sys.stderr)
         return 2
 
 

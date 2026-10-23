@@ -13,7 +13,7 @@ import (
 
 // RunOptions contains effective limits and lifecycle callbacks supplied by the
 // execution manager. OnOutputLimit must be called synchronously when the shared
-// output budget is reached.
+// output budget is exceeded.
 type RunOptions struct {
 	MaxOutputBytes   int
 	OnOutputLimit    func()

@@ -16,24 +16,26 @@ import (
 	"testing"
 	"time"
 
+	"github.com/haonox/toolane/internal/execution"
 	"github.com/haonox/toolane/internal/httpapi"
 )
 
 func TestLoadServerConfigRequiresPrivateLoopbackConfiguration(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "server.json")
-	valid := `{"listen":"127.0.0.1:0","tokens":[{"token":"a-long-private-token-123","tenant_id":"local","tools":["mock.delay"]}]}`
+	valid := `{"business_listen":"127.0.0.1:0","tokens":[{"token":"a-long-private-token-123","tenant_id":"local","tools":["mock.delay"]}]}`
 	if err := os.WriteFile(path, []byte(valid), 0600); err != nil {
 		t.Fatal(err)
 	}
 	config, err := loadServerConfig(path)
-	if err != nil || config.Listen != "127.0.0.1:0" || len(config.Tokens) != 1 {
+	if err != nil || config.BusinessListen != "127.0.0.1:0" || config.MetricsListen != "127.0.0.1:9090" || len(config.Tokens) != 1 {
 		t.Fatalf("valid config: %+v err=%v", config, err)
 	}
 	for _, raw := range []string{
 		strings.Replace(valid, "127.0.0.1:0", "0.0.0.0:8080", 1),
 		strings.Replace(valid, `"tokens":`, `"metrics_listen":"0.0.0.0:9090","tokens":`, 1),
 		strings.Replace(valid, "mock.delay", "process.printf", 1),
+		strings.Replace(valid, "business_listen", "listen", 1),
 		valid + `{}`,
 		strings.Replace(valid, `"tokens":`, `"unsupported_option":true,"tokens":`, 1),
 	} {
@@ -49,6 +51,52 @@ func TestLoadServerConfigRequiresPrivateLoopbackConfiguration(t *testing.T) {
 	}
 	if _, err := loadServerConfig(path); err == nil {
 		t.Fatal("accepted world-readable token configuration")
+	}
+}
+
+func TestServerExecutionConfigOverridesAndRejectsInvalidCapacity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "server.json")
+	base := `"tokens":[{"token":"a-long-private-token-123","tenant_id":"local","tools":["mock.delay"]}]`
+	write := func(raw string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(`{` + base + `}`)
+	config, err := loadServerConfig(path)
+	if err != nil || config.executionConfig() != execution.DefaultConfig() {
+		t.Fatalf("omitted execution config: %+v err=%v", config.executionConfig(), err)
+	}
+	write(`{` + base + `,"execution":{"workers":12}}`)
+	config, err = loadServerConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial := execution.DefaultConfig()
+	partial.Workers = 12
+	if config.executionConfig() != partial {
+		t.Fatalf("partial execution config: %+v", config.executionConfig())
+	}
+	write(`{` + base + `,"execution":{"workers":32,"queue_capacity":4096,` +
+		`"tenant_running_limit":8,"tenant_pending_limit":512,"retained_results":10000}}`)
+	config, err = loadServerConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capacity := config.executionConfig()
+	if capacity.Workers != 32 || capacity.QueueCapacity != 4096 || capacity.TenantRunningLimit != 8 ||
+		capacity.TenantPendingLimit != 512 || capacity.RetainedResults != 10000 ||
+		capacity.MaxArgumentBytes != execution.DefaultConfig().MaxArgumentBytes {
+		t.Fatalf("wrong execution capacity: %+v", capacity)
+	}
+	write(`{` + base + `,"execution":{"workers":0}}`)
+	if err := runServerWithLogger(context.Background(), path, slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil {
+		t.Fatal("explicit zero workers accepted at startup")
+	}
+	write(`{` + base + `,"execution":{"unknown_capacity":1}}`)
+	if _, err := loadServerConfig(path); err == nil {
+		t.Fatal("unknown execution setting accepted")
 	}
 }
 
@@ -70,7 +118,7 @@ func TestRunServerStartsAndStopsLocalAPI(t *testing.T) {
 	_ = managementListener.Close()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "server.json")
-	raw, err := json.Marshal(serverConfig{Listen: address, MetricsListen: managementAddress, Tokens: []httpapi.Token{{Value: "local-test-secret-123456", TenantID: "local", Tools: []string{"mock.delay"}}}})
+	raw, err := json.Marshal(serverConfig{BusinessListen: address, MetricsListen: managementAddress, Tokens: []httpapi.Token{{Value: "local-test-secret-123456", TenantID: "local", Tools: []string{"mock.delay"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
