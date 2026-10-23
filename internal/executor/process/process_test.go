@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -16,7 +15,6 @@ import (
 
 	"github.com/haonox/toolane/internal/execution"
 	"github.com/haonox/toolane/internal/executor/process"
-	"github.com/haonox/toolane/internal/store/sqlite"
 	"github.com/haonox/toolane/internal/tool"
 )
 
@@ -38,7 +36,8 @@ func TestHelperProcess(t *testing.T) {
 		}
 	case "sleep", "child_wait":
 		if path := os.Getenv("TOOLANE_READY_FILE"); path != "" {
-			_ = os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0600)
+			_ = os.WriteFile(path+".tmp", []byte(strconv.Itoa(os.Getpid())), 0600)
+			_ = os.Rename(path+".tmp", path)
 		}
 		time.Sleep(30 * time.Second)
 	case "child", "exit_early_child", "closed_pipes_child":
@@ -102,16 +101,7 @@ func processManager(t *testing.T, mode, readyFile string, config execution.Confi
 
 func newProcessTestManager(t *testing.T, config execution.Config, registry *tool.Registry) *execution.Manager {
 	t.Helper()
-	store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "state"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := store.Close(); err != nil {
-			t.Errorf("close store: %v", err)
-		}
-	})
-	m, err := execution.NewManager(context.Background(), config, registry, store)
+	m, err := execution.NewManager(config, registry)
 	if err != nil {
 		t.Fatal(err)
 	}

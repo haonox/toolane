@@ -16,7 +16,6 @@ import (
 	"github.com/haonox/toolane/internal/execution"
 	"github.com/haonox/toolane/internal/executor/mock"
 	"github.com/haonox/toolane/internal/executor/process"
-	"github.com/haonox/toolane/internal/store/sqlite"
 	"github.com/haonox/toolane/internal/tool"
 )
 
@@ -34,17 +33,17 @@ func main() {
 		}
 		return
 	}
-	if len(os.Args) != 5 || os.Args[1] != "demo" || os.Args[3] != "--state-dir" || !filepath.IsAbs(os.Args[4]) {
-		fmt.Fprintln(os.Stderr, "usage: toolane demo [mock|process] --state-dir /absolute/path/state or toolane serve --config /absolute/path/config.json")
+	if len(os.Args) != 3 || os.Args[1] != "demo" {
+		fmt.Fprintln(os.Stderr, "usage: toolane demo [mock|process] or toolane serve --config /absolute/path/config.json")
 		os.Exit(2)
 	}
-	if err := demo(os.Args[2], os.Args[4]); err != nil {
+	if err := demo(os.Args[2]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func demo(kind, stateDir string) (retErr error) {
+func demo(kind string) (retErr error) {
 	registry := tool.NewRegistry()
 	var def tool.Definition
 	var args json.RawMessage
@@ -89,13 +88,7 @@ func demo(kind, stateDir string) (retErr error) {
 	if err := registry.Register(def); err != nil {
 		return err
 	}
-	// The caller chooses the state directory so demo history remains available.
-	store, err := sqlite.Open(context.Background(), stateDir)
-	if err != nil {
-		return err
-	}
-	defer func() { retErr = errors.Join(retErr, store.Close()) }()
-	manager, err := execution.NewManager(context.Background(), execution.DefaultConfig(), registry, store)
+	manager, err := execution.NewManager(execution.DefaultConfig(), registry)
 	if err != nil {
 		return err
 	}

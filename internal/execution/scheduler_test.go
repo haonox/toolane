@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/haonox/toolane/internal/tool"
 	"reflect"
 	"sync/atomic"
 	"testing"
@@ -12,11 +13,30 @@ import (
 )
 
 func tenantRequest(tenant, value string) Request {
-	return Request{TenantID: tenant, Tool: "workflow.test", Arguments: json.RawMessage(fmt.Sprintf("%q", value))}
+	return Request{TenantID: tenant, Tool: "scheduler.test", Arguments: json.RawMessage(fmt.Sprintf("%q", value))}
 }
 
 // ACC-10: with the same accepted backlog, round robin gives B a claim before
 // A's second task; FIFO retains the original ready order.
+func schedulerManager(t *testing.T, config Config, execute func(context.Context, string) error) *Manager {
+	t.Helper()
+	registry := tool.NewRegistry()
+	if err := registry.Register(tool.Definition{
+		Name:     "scheduler.test",
+		Validate: func(raw json.RawMessage) error { var value string; return json.Unmarshal(raw, &value) },
+		Execute: func(ctx context.Context, raw json.RawMessage, _ tool.RunOptions) (tool.Outcome, error) {
+			var value string
+			if err := json.Unmarshal(raw, &value); err != nil {
+				return tool.Outcome{}, err
+			}
+			return tool.Outcome{}, execute(ctx, value)
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return newTestManagerWithRegistry(t, config, registry)
+}
+
 func TestTenantRoundRobinAndFIFOOrder(t *testing.T) {
 	for _, tc := range []struct {
 		mode SchedulerMode
@@ -31,7 +51,7 @@ func TestTenantRoundRobinAndFIFOOrder(t *testing.T) {
 			config.Scheduler = tc.mode
 			started := make(chan string, 6)
 			release := make(chan struct{})
-			m := workflowManager(t, config, func(ctx context.Context, value string) error {
+			m := schedulerManager(t, config, func(ctx context.Context, value string) error {
 				started <- value
 				if value == "anchor" {
 					select {
@@ -91,7 +111,7 @@ func TestTenantRunningLimitSkipsSaturatedTenant(t *testing.T) {
 	releaseA := make(chan struct{})
 	releaseB := make(chan struct{})
 	var activeA, peakA atomic.Int32
-	m := workflowManager(t, config, func(ctx context.Context, value string) error {
+	m := schedulerManager(t, config, func(ctx context.Context, value string) error {
 		if value == "A1" || value == "A2" {
 			current := activeA.Add(1)
 			if current > peakA.Load() {
@@ -168,7 +188,7 @@ func TestTenantContinuousSubmissionDoesNotStarveOtherTenant(t *testing.T) {
 	producerAccepted := make(chan struct{})
 	allowAAfterB := make(chan struct{})
 	var aStarted, accepted, rejected atomic.Int32
-	m := workflowManager(t, config, func(ctx context.Context, value string) error {
+	m := schedulerManager(t, config, func(ctx context.Context, value string) error {
 		switch value {
 		case "anchor":
 			started <- value
@@ -301,69 +321,10 @@ func TestTenantContinuousSubmissionDoesNotStarveOtherTenant(t *testing.T) {
 	t.Logf("ACC-10: A accepted=%d after initial %d, rejected=%d; B claimed after %d A tasks", accepted.Load(), config.TenantPendingLimit, rejected.Load(), aBeforeB)
 }
 
-func TestTenantPendingLimitRejectsWithoutPartialWorkflow(t *testing.T) {
-	config := DefaultConfig()
-	config.Workers = 1
-	config.QueueCapacity = 5
-	config.TenantPendingLimit = 2
-	started := make(chan struct{})
-	release := make(chan struct{})
-	m := workflowManager(t, config, func(ctx context.Context, value string) error {
-		if value == "hold" {
-			close(started)
-			select {
-			case <-release:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-		return nil
-	})
-	t.Cleanup(func() {
-		select {
-		case <-release:
-		default:
-			close(release)
-		}
-	})
-	hold := submit(t, m, tenantRequest("A", "hold"))
-	<-started
-	a1 := submit(t, m, tenantRequest("A", "A1"))
-	a2 := submit(t, m, tenantRequest("A", "A2"))
-	if _, err := m.Submit(context.Background(), tenantRequest("A", "A3")); !errors.Is(err, ErrTenantQueueFull) {
-		t.Fatalf("tenant pending rejection = %v", err)
-	}
-	if _, err := m.SubmitWorkflow(context.Background(), WorkflowRequest{TenantID: "A", Nodes: []WorkflowNode{workflowNode("x"), workflowNode("y", "x")}}); !errors.Is(err, ErrTenantQueueFull) {
-		t.Fatalf("tenant workflow rejection = %v", err)
-	}
-	b, err := m.SubmitWorkflow(context.Background(), WorkflowRequest{TenantID: "B", Nodes: []WorkflowNode{workflowNode("x"), workflowNode("y", "x")}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b.TenantID != "B" || b.Nodes[0].TenantID != "B" || b.Nodes[1].TenantID != "B" {
-		t.Fatalf("workflow tenant identity: %+v", b)
-	}
-	if stats := m.Stats(); stats.Pending != 4 || stats.Stored != 5 || stats.Tenants != 2 {
-		t.Fatalf("rejected batch left partial records: %+v", stats)
-	}
-	if node, err := m.Cancel(a1.ID); err != nil || node.State != Cancelled {
-		t.Fatalf("cancel pending A task: %+v, %v", node, err)
-	}
-	a3 := submit(t, m, tenantRequest("A", "A3"))
-	close(release)
-	for _, id := range []string{hold.ID, a2.ID, a3.ID} {
-		awaitState(t, m, id, Succeeded)
-	}
-	awaitWorkflow(t, m, b.ID, Succeeded)
-	if stats := m.Stats(); stats.Pending != 0 || stats.Running != 0 || stats.Tenants != 0 {
-		t.Fatalf("tenant reservations not released: %+v", stats)
-	}
-}
-
 func TestTenantIdentityAndSchedulerConfiguration(t *testing.T) {
 	config := DefaultConfig()
 	config.MaxTenantIDBytes = 5
-	m := workflowManager(t, config, func(context.Context, string) error { return nil })
+	m := schedulerManager(t, config, func(context.Context, string) error { return nil })
 	if _, err := m.Submit(context.Background(), tenantRequest("too-long", "x")); !errors.Is(err, ErrTenantIDTooLarge) {
 		t.Fatalf("oversized tenant ID = %v", err)
 	}
@@ -381,7 +342,7 @@ func TestTenantIdentityAndSchedulerConfiguration(t *testing.T) {
 func TestTenantStateDoesNotGrowAcrossCompletedIDs(t *testing.T) {
 	config := DefaultConfig()
 	config.RetainedResults = 1
-	m := workflowManager(t, config, func(context.Context, string) error { return nil })
+	m := schedulerManager(t, config, func(context.Context, string) error { return nil })
 	for i := range 100 {
 		s := submit(t, m, tenantRequest(fmt.Sprintf("tenant-%d", i), "done"))
 		awaitState(t, m, s.ID, Succeeded)

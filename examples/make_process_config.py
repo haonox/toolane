@@ -12,10 +12,8 @@ import sys
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, type=Path)
-    parser.add_argument("--state-dir", required=True, type=Path)
     args = parser.parse_args()
     config_path = args.config.resolve()
-    state_dir = args.state_dir.resolve()
     config_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if config_path.exists():
         parser.error("config already exists; choose a new path to avoid replacing credentials")
@@ -29,7 +27,6 @@ def main():
     }
     config = {
         "listen": "127.0.0.1:8080",
-        "state_dir": str(state_dir),
         "process_tools": [{
             "name": "text.stats",
             "description": "Count characters and words in text and return its SHA-256 hash.",

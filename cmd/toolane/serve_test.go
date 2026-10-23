@@ -22,20 +22,18 @@ import (
 func TestLoadServerConfigRequiresPrivateLoopbackConfiguration(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "server.json")
-	stateDir := filepath.Join(dir, "state")
-	valid := `{"listen":"127.0.0.1:0","state_dir":"` + stateDir + `","tokens":[{"token":"a-long-private-token-123","tenant_id":"local","tools":["mock.delay"]}]}`
+	valid := `{"listen":"127.0.0.1:0","tokens":[{"token":"a-long-private-token-123","tenant_id":"local","tools":["mock.delay"]}]}`
 	if err := os.WriteFile(path, []byte(valid), 0600); err != nil {
 		t.Fatal(err)
 	}
 	config, err := loadServerConfig(path)
-	if err != nil || config.Listen != "127.0.0.1:0" || config.StateDir != stateDir || len(config.Tokens) != 1 || config.SSETenantLimit != 8 || config.SSEGlobalLimit != 64 {
+	if err != nil || config.Listen != "127.0.0.1:0" || len(config.Tokens) != 1 {
 		t.Fatalf("valid config: %+v err=%v", config, err)
 	}
 	for _, raw := range []string{
 		strings.Replace(valid, "127.0.0.1:0", "0.0.0.0:8080", 1),
 		strings.Replace(valid, `"tokens":`, `"metrics_listen":"0.0.0.0:9090","tokens":`, 1),
 		strings.Replace(valid, "mock.delay", "process.printf", 1),
-		strings.Replace(valid, `"tokens":`, `"sse_tenant_limit":9,"sse_global_limit":8,"tokens":`, 1),
 		valid + `{}`,
 		strings.Replace(valid, `"tokens":`, `"unsupported_option":true,"tokens":`, 1),
 	} {
@@ -54,7 +52,7 @@ func TestLoadServerConfigRequiresPrivateLoopbackConfiguration(t *testing.T) {
 	}
 }
 
-func TestRunServerStartsAndStopsLocalDurableAPI(t *testing.T) {
+func TestRunServerStartsAndStopsLocalAPI(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		if errors.Is(err, syscall.EPERM) {
@@ -72,8 +70,7 @@ func TestRunServerStartsAndStopsLocalDurableAPI(t *testing.T) {
 	_ = managementListener.Close()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "server.json")
-	raw, err := json.Marshal(serverConfig{Listen: address, MetricsListen: managementAddress, StateDir: filepath.Join(dir, "state"),
-		Tokens: []httpapi.Token{{Value: "local-test-secret-123456", TenantID: "local", Tools: []string{"mock.delay"}}}})
+	raw, err := json.Marshal(serverConfig{Listen: address, MetricsListen: managementAddress, Tokens: []httpapi.Token{{Value: "local-test-secret-123456", TenantID: "local", Tools: []string{"mock.delay"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,19 +129,32 @@ func TestRunServerStartsAndStopsLocalDurableAPI(t *testing.T) {
 	if invalidResponse.StatusCode != http.StatusBadRequest {
 		t.Fatalf("malformed admission status=%d", invalidResponse.StatusCode)
 	}
-	eventsRequest, err := http.NewRequest(http.MethodGet, base+"/api/v1/executions/"+accepted.ExecutionID+"/events", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	eventsRequest.Header.Set("Authorization", "Bearer local-test-secret-123456")
-	eventsResponse, err := client.Do(eventsRequest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	events, readErr := io.ReadAll(eventsResponse.Body)
-	_ = eventsResponse.Body.Close()
-	if eventsResponse.StatusCode != http.StatusOK || readErr != nil || !strings.Contains(string(events), "event: end\n") {
-		t.Fatalf("HTTP event stream status=%d body=%q err=%v", eventsResponse.StatusCode, events, readErr)
+	resultDeadline := time.Now().Add(3 * time.Second)
+	for {
+		query, err := http.NewRequest(http.MethodGet, base+"/api/v1/executions/"+accepted.ExecutionID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		query.Header.Set("Authorization", "Bearer local-test-secret-123456")
+		current, err := client.Do(query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var snapshot struct {
+			Status string `json:"status"`
+		}
+		decodeErr := json.NewDecoder(current.Body).Decode(&snapshot)
+		_ = current.Body.Close()
+		if decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		if snapshot.Status == "succeeded" {
+			break
+		}
+		if time.Now().After(resultDeadline) {
+			t.Fatalf("execution did not succeed: %s", snapshot.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	metricsResponse, err := client.Get("http://" + managementAddress + "/metrics")
 	if err != nil {
@@ -206,7 +216,7 @@ func TestRunServerStartsAndStopsLocalDurableAPI(t *testing.T) {
 			}
 		}
 	}
-	for _, message := range []string{"recovery_complete", "service_ready", "metrics_ready", "http_request", "execution_transition"} {
+	for _, message := range []string{"service_ready", "metrics_ready", "http_request", "execution_transition"} {
 		if !seen[message] {
 			t.Fatalf("missing %s log: %s", message, logText)
 		}

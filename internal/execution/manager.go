@@ -1,4 +1,4 @@
-// Package execution owns the lifecycle of local tool executions.
+// Package execution owns the in-memory lifecycle of local tool executions.
 package execution
 
 import (
@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/haonox/toolane/internal/store/sqlite"
 	"github.com/haonox/toolane/internal/tool"
 )
 
@@ -27,6 +26,7 @@ var (
 	ErrAgentIDTooLarge = errors.New("agent ID exceeds limit")
 	// ErrArgumentsTooLarge indicates that tool arguments exceed their byte limit.
 	ErrArgumentsTooLarge = errors.New("tool arguments exceed limit")
+	ErrInvalidRequest    = errors.New("invalid execution request")
 	// ErrTenantIDTooLarge indicates that a tenant ID exceeds its byte limit.
 	ErrTenantIDTooLarge = errors.New("tenant ID exceeds limit")
 	// ErrTenantQueueFull indicates that a tenant's pending capacity is exhausted.
@@ -35,8 +35,6 @@ var (
 	ErrBackendUnavailable = errors.New("execution backend unavailable")
 	// ErrStopUnconfirmed indicates that shutdown could not confirm all work stopped.
 	ErrStopUnconfirmed = errors.New("execution stop could not be confirmed")
-	// ErrInvalidRequest identifies caller-controlled input rejected before admission.
-	ErrInvalidRequest = errors.New("invalid execution request")
 )
 
 // State describes the public execution lifecycle.
@@ -52,16 +50,13 @@ const (
 )
 
 const (
-	Blocked     State = "blocked"
-	Queued      State = "queued"
-	Running     State = "running"
-	Cancelling  State = "cancelling"
-	Succeeded   State = "succeeded"
-	Failed      State = "failed"
-	TimedOut    State = "timed_out"
-	Cancelled   State = "cancelled"
-	Skipped     State = "skipped"
-	Interrupted State = "interrupted"
+	Queued     State = "queued"
+	Running    State = "running"
+	Cancelling State = "cancelling"
+	Succeeded  State = "succeeded"
+	Failed     State = "failed"
+	TimedOut   State = "timed_out"
+	Cancelled  State = "cancelled"
 )
 
 // Config bounds active work and retained results. Use DefaultConfig as a
@@ -74,10 +69,6 @@ type Config struct {
 	MaxTenantIDBytes     int
 	Scheduler            SchedulerMode
 	RetainedResults      int
-	DurableRecordLimit   int
-	DurableRetention     time.Duration
-	MaxWorkflowNodes     int
-	MaxWorkflowBytes     int
 	DefaultQueueTimeout  time.Duration
 	MaxQueueTimeout      time.Duration
 	DefaultRunTimeout    time.Duration
@@ -99,10 +90,6 @@ func DefaultConfig() Config {
 		MaxTenantIDBytes:     256,
 		Scheduler:            SchedulerRoundRobin,
 		RetainedResults:      1000,
-		DurableRecordLimit:   10000,
-		DurableRetention:     7 * 24 * time.Hour,
-		MaxWorkflowNodes:     64,
-		MaxWorkflowBytes:     256 * 1024,
 		DefaultQueueTimeout:  30 * time.Second,
 		MaxQueueTimeout:      300 * time.Second,
 		DefaultRunTimeout:    10 * time.Second,
@@ -116,7 +103,7 @@ func DefaultConfig() Config {
 }
 
 func (c Config) validate() error {
-	if c.Workers <= 0 || c.QueueCapacity <= 0 || c.TenantRunningLimit <= 0 || c.TenantPendingLimit <= 0 || c.MaxTenantIDBytes <= 0 || c.RetainedResults <= 0 || c.DurableRecordLimit <= 0 || c.DurableRetention <= 0 || c.MaxWorkflowNodes <= 0 || c.MaxWorkflowBytes <= 0 || c.MaxResultBytes <= 0 || c.MaxArgumentBytes <= 0 || c.MaxOutputBytes <= 0 || c.MaxAgentIDBytes <= 0 || c.MaxErrorMessageBytes <= 0 {
+	if c.Workers <= 0 || c.QueueCapacity <= 0 || c.TenantRunningLimit <= 0 || c.TenantPendingLimit <= 0 || c.MaxTenantIDBytes <= 0 || c.RetainedResults <= 0 || c.MaxResultBytes <= 0 || c.MaxArgumentBytes <= 0 || c.MaxOutputBytes <= 0 || c.MaxAgentIDBytes <= 0 || c.MaxErrorMessageBytes <= 0 {
 		return errors.New("workers, global and tenant capacities, retained results and byte limits must be positive")
 	}
 	if c.MaxTenantIDBytes < len("local") {
@@ -151,14 +138,11 @@ type Snapshot struct {
 	TenantID           string          `json:"tenant_id"`
 	AgentID            string          `json:"agent_id,omitempty"`
 	Tool               string          `json:"tool"`
-	WorkflowID         string          `json:"workflow_id,omitempty"`
-	NodeID             string          `json:"node_id,omitempty"`
 	State              State           `json:"status"`
 	ErrorCode          string          `json:"error_code,omitempty"`
 	ErrorMessage       string          `json:"error_message,omitempty"`
 	StopReason         string          `json:"stop_reason,omitempty"`
 	CleanupStatus      string          `json:"cleanup_status"`
-	CleanupError       string          `json:"cleanup_error,omitempty"`
 	Result             json.RawMessage `json:"result,omitempty"`
 	Stdout             string          `json:"stdout,omitempty"`
 	Stderr             string          `json:"stderr,omitempty"`
@@ -177,23 +161,16 @@ type Snapshot struct {
 }
 
 type record struct {
-	snapshot        Snapshot
-	arguments       json.RawMessage
-	deadline        time.Time
-	version         int64
-	outputEvents    []sqlite.Event
-	cancel          context.CancelFunc
-	tenant          *tenantState
-	workflow        *workflow
-	dependsOn       []*record
-	dependents      []*record
-	terminalCounted bool
+	snapshot  Snapshot
+	arguments json.RawMessage
+	deadline  time.Time
+	cancel    context.CancelFunc
+	tenant    *tenantState
 }
 
 // Stats reports current capacity use. It is a snapshot, not a reservation.
 type Stats struct {
 	Queued  int
-	Blocked int
 	Pending int
 	Running int
 	Stored  int
@@ -210,20 +187,14 @@ type Manager struct {
 	transitionObserver func(Snapshot, Snapshot)
 	cond               *sync.Cond
 	config             Config
-	store              *sqlite.Store
-	eventWatchers      map[string]map[chan struct{}]struct{}
-	storeError         error
-	runtimeRelease     func()
 	tools              map[string]tool.Definition
 	policies           map[string]effectivePolicy
 	records            map[string]*record
-	workflows          map[string]*workflow
 	tenants            map[string]*tenantState
 	tenantOrder        []string
 	rrCursor           int
 	queue              []*record
-	terminal           []terminalGroup
-	terminalCount      int
+	terminal           []string
 	pending            int
 	running            int
 	closing            bool
@@ -234,15 +205,17 @@ type Manager struct {
 	workers            sync.WaitGroup
 }
 
-func newManager(config Config, registry *tool.Registry, store *sqlite.Store) (*Manager, error) {
+// NewManager freezes the registry and starts a fixed worker pool plus one queue
+// deadline monitor. Call Close to stop them.
+func NewManager(config Config, registry *tool.Registry, observers ...func(Snapshot, Snapshot)) (*Manager, error) {
+	if len(observers) > 1 {
+		return nil, errors.New("at most one observer allowed")
+	}
 	if err := config.validate(); err != nil {
 		return nil, err
 	}
 	if registry == nil {
 		return nil, errors.New("nil tool registry")
-	}
-	if store == nil {
-		return nil, errors.New("nil execution store")
 	}
 	definitions := registry.Snapshot()
 	policies := make(map[string]effectivePolicy, len(definitions))
@@ -254,53 +227,34 @@ func newManager(config Config, registry *tool.Registry, store *sqlite.Store) (*M
 		policies[name] = policy
 	}
 	m := &Manager{
-		config:        config,
-		store:         store,
-		eventWatchers: make(map[string]map[chan struct{}]struct{}),
-		tools:         definitions,
-		policies:      policies,
-		records:       make(map[string]*record),
-		workflows:     make(map[string]*workflow),
-		tenants:       make(map[string]*tenantState),
-		expiry:        make(chan struct{}, 1),
-		stop:          make(chan struct{}),
-		done:          make(chan struct{}),
+		config:   config,
+		tools:    definitions,
+		policies: policies,
+		records:  make(map[string]*record),
+		tenants:  make(map[string]*tenantState),
+		expiry:   make(chan struct{}, 1),
+		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
+	}
+	if len(observers) == 1 {
+		m.transitionObserver = observers[0]
 	}
 	m.cond = sync.NewCond(&m.mu)
-	return m, nil
-}
-
-func (m *Manager) startWorkers() {
-	config := m.config
-	count := config.Workers + 2
-	m.workers.Add(count)
+	m.workers.Add(config.Workers + 1)
 	for range config.Workers {
 		go m.worker()
 	}
 	go m.expireQueued()
-	go m.prunePeriodically()
 	go func() {
 		m.workers.Wait()
 		close(m.done)
 	}()
+	return m, nil
 }
 
 // Submit validates a request before admission and returns its initial queued
 // state. Queue limits count accepted work not yet claimed by a worker.
 func (m *Manager) Submit(ctx context.Context, req Request) (Snapshot, error) {
-	return m.submit(ctx, req, "")
-}
-
-// SubmitIdempotent scopes the key to the authenticated tenant and
-// single-execution submission endpoint.
-func (m *Manager) SubmitIdempotent(ctx context.Context, req Request, key string) (Snapshot, error) {
-	if key == "" {
-		return Snapshot{}, errors.New("idempotent submission requires a nonempty key")
-	}
-	return m.submit(ctx, req, key)
-}
-
-func (m *Manager) submit(ctx context.Context, req Request, key string) (Snapshot, error) {
 	prepared, err := m.prepareRequest(ctx, req)
 	if err != nil {
 		return Snapshot{}, err
@@ -314,44 +268,14 @@ func (m *Manager) submit(ctx context.Context, req Request, key string) (Snapshot
 	if err := m.admissionError(ctx); err != nil {
 		return Snapshot{}, err
 	}
-	normalizedRequest, err := encodeNormalizedRequest(prepared)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	if key != "" {
-		oldID, found, err := m.store.ResolveIdempotency(ctx, prepared.request.TenantID, executionEndpoint, key, normalizedRequest)
-		if err != nil {
-			if !errors.Is(err, sqlite.ErrIdempotencyConflict) && ctx.Err() == nil {
-				m.haltStoreLocked(err)
-			}
-			return Snapshot{}, err
-		}
-		if found {
-			return m.getLocked(oldID)
-		}
-	}
 	if m.pending >= m.config.QueueCapacity {
 		return Snapshot{}, ErrQueueFull
 	}
 	if state := m.tenants[prepared.request.TenantID]; state != nil && state.pending >= m.config.TenantPendingLimit {
 		return Snapshot{}, ErrTenantQueueFull
 	}
-	if err := m.pruneDurableLocked(1); err != nil {
-		return Snapshot{}, err
-	}
 	now := time.Now().UTC()
-	r := prepared.makeRecord(id, "", "", now, true)
-	// Once admission begins, its database transaction must finish even if
-	// the submitting client disconnects. A retry can resolve the key.
-	persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	oldID, reused, err := m.createStoredExecutionLocked(persistCtx, r, normalizedRequest, key)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	if reused {
-		return m.getLocked(oldID)
-	}
+	r := prepared.makeRecord(id, now)
 	m.records[id] = r
 	m.queue = append(m.queue, r)
 	m.admitPendingLocked(r)
@@ -406,9 +330,6 @@ func (m *Manager) prepareRequest(ctx context.Context, req Request) (preparedRequ
 		return preparedRequest{}, ErrArgumentsTooLarge
 	}
 	arguments := append(json.RawMessage(nil), req.Arguments...)
-	if len(arguments) > 0 && !json.Valid(arguments) {
-		return preparedRequest{}, fmt.Errorf("%w: tool arguments must be JSON", ErrInvalidRequest)
-	}
 	if err := def.Validate(arguments); err != nil {
 		return preparedRequest{}, fmt.Errorf("%w: invalid tool arguments: %v", ErrInvalidRequest, err)
 	}
@@ -423,38 +344,17 @@ func (m *Manager) admissionError(ctx context.Context) error {
 		return ErrClosed
 	}
 	if m.halted {
-		if m.storeError != nil {
-			return fmt.Errorf("%w: storage: %v", ErrBackendUnavailable, m.storeError)
-		}
 		return ErrBackendUnavailable
 	}
 	return nil
 }
 
-func (p preparedRequest) makeRecord(id, workflowID, nodeID string, now time.Time, ready bool) *record {
-	state := Blocked
-	var readyAt *time.Time
-	if ready {
-		state = Queued
-		readyAt = &now
-	}
-	return &record{snapshot: Snapshot{
-		ID:                 id,
-		TenantID:           p.request.TenantID,
-		AgentID:            p.request.AgentID,
-		Tool:               p.request.Tool,
-		WorkflowID:         workflowID,
-		NodeID:             nodeID,
-		State:              state,
-		CleanupStatus:      "not_needed",
-		CreatedAt:          now,
-		ReadyAt:            readyAt,
-		QueueTimeout:       p.queueTimeout,
-		ExecutionTimeout:   p.runTimeout,
-		OutputLimitBytes:   p.outputLimit,
-		ArgumentLimitBytes: p.policy.maxArgumentBytes,
-		ResultLimitBytes:   p.policy.maxResultBytes,
-	}, arguments: p.arguments, deadline: now.Add(p.queueTimeout)}
+func (p preparedRequest) makeRecord(id string, now time.Time) *record {
+	return &record{snapshot: Snapshot{ID: id, TenantID: p.request.TenantID, AgentID: p.request.AgentID,
+		Tool: p.request.Tool, State: Queued, CleanupStatus: "not_needed", CreatedAt: now, ReadyAt: &now,
+		QueueTimeout: p.queueTimeout, ExecutionTimeout: p.runTimeout, OutputLimitBytes: p.outputLimit,
+		ArgumentLimitBytes: p.policy.maxArgumentBytes, ResultLimitBytes: p.policy.maxResultBytes},
+		arguments: p.arguments, deadline: now.Add(p.queueTimeout)}
 }
 
 func resolveTimeout(given, fallback, maximum time.Duration) (time.Duration, error) {
@@ -479,26 +379,9 @@ func newID() (string, error) {
 func (m *Manager) Get(id string) (Snapshot, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.getLocked(id)
-}
-
-func (m *Manager) getLocked(id string) (Snapshot, error) {
 	r, ok := m.records[id]
 	if !ok {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		row, err := m.store.GetExecution(ctx, id)
-		if errors.Is(err, sqlite.ErrNotFound) {
-			return Snapshot{}, ErrNotFound
-		}
-		if err != nil {
-			return Snapshot{}, err
-		}
-		recovered, err := decodeStoredExecution(row)
-		if err != nil {
-			return Snapshot{}, err
-		}
-		return cloneSnapshot(recovered.snapshot), nil
+		return Snapshot{}, ErrNotFound
 	}
 	return cloneSnapshot(r.snapshot), nil
 }
@@ -509,45 +392,21 @@ func (m *Manager) Cancel(id string) (Snapshot, error) {
 	m.mu.Lock()
 	r, ok := m.records[id]
 	if !ok {
-		snapshot, err := m.getLocked(id)
 		m.mu.Unlock()
-		if err == nil && snapshot.FinishedAt != nil {
-			return snapshot, nil
-		}
-		if err != nil {
-			return Snapshot{}, err
-		}
 		return Snapshot{}, ErrNotFound
 	}
 	var cancel context.CancelFunc
 	switch r.snapshot.State {
-	case Blocked:
-		if err := m.finishLocked(r, Cancelled, "cancelled", "cancelled before execution"); err != nil {
-			m.mu.Unlock()
-			return Snapshot{}, err
-		}
-		m.releasePendingLocked(r)
-		m.wakeExpiry()
 	case Queued:
-		if err := m.finishLocked(r, Cancelled, "cancelled", "cancelled before execution"); err != nil {
-			m.mu.Unlock()
-			return Snapshot{}, err
-		}
 		m.removeQueued(r)
 		m.releasePendingLocked(r)
+		m.finishLocked(r, Cancelled, "cancelled", "cancelled before execution")
 		m.wakeExpiry()
 	case Running:
 		next := cloneSnapshot(r.snapshot)
 		next.State = Cancelling
 		next.StopReason = "user_cancelled"
-		if err := m.applySnapshotLocked(r, next); err != nil {
-			cancel = r.cancel
-			m.mu.Unlock()
-			if cancel != nil {
-				cancel()
-			}
-			return Snapshot{}, err
-		}
+		m.applySnapshotLocked(r, next)
 		cancel = r.cancel
 	}
 	snapshot := cloneSnapshot(r.snapshot)
@@ -562,7 +421,7 @@ func (m *Manager) Cancel(id string) (Snapshot, error) {
 func (m *Manager) Stats() Stats {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return Stats{Queued: len(m.queue), Blocked: m.pending - len(m.queue), Pending: m.pending, Running: m.running, Stored: len(m.records), Tenants: len(m.tenants), Halted: m.halted, Closing: m.closing}
+	return Stats{Queued: len(m.queue), Pending: m.pending, Running: m.running, Stored: len(m.records), Tenants: len(m.tenants), Halted: m.halted, Closing: m.closing}
 }
 
 // Close stops admission, cancels accepted work, and waits for all owned
@@ -571,40 +430,21 @@ func (m *Manager) Stats() Stats {
 func (m *Manager) Close(ctx context.Context) error {
 	m.mu.Lock()
 	var cancels []context.CancelFunc
-	var closeErr error
 	if !m.closing {
 		m.closing = true
-		for _, w := range m.workflows {
-			if w.remaining > 0 {
-				if err := m.transitionWorkflowLocked(w, Cancelling, nil); err != nil {
-					closeErr = errors.Join(closeErr, err)
-				}
-				w.cancelled = true
-			}
-		}
 		for len(m.queue) > 0 {
 			r := m.queue[0]
 			m.queue[0] = nil
 			m.queue = m.queue[1:]
-			if err := m.finishLocked(r, Cancelled, "cancelled", "manager closed before execution"); err != nil {
-				closeErr = errors.Join(closeErr, err)
-			}
 			m.releasePendingLocked(r)
+			m.finishLocked(r, Cancelled, "cancelled", "manager closed before execution")
 		}
 		for _, r := range m.records {
-			if r.snapshot.State == Blocked {
-				if err := m.finishLocked(r, Cancelled, "cancelled", "manager closed before execution"); err != nil {
-					closeErr = errors.Join(closeErr, err)
-				}
-				m.releasePendingLocked(r)
-			}
 			if r.snapshot.State == Running {
 				next := cloneSnapshot(r.snapshot)
 				next.State = Cancelling
 				next.StopReason = "service_shutdown"
-				if err := m.applySnapshotLocked(r, next); err != nil {
-					closeErr = errors.Join(closeErr, err)
-				}
+				m.applySnapshotLocked(r, next)
 				cancels = append(cancels, r.cancel)
 			}
 		}
@@ -620,15 +460,11 @@ func (m *Manager) Close(ctx context.Context) error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if m.running != 0 {
-			return errors.Join(closeErr, m.storeError, ErrStopUnconfirmed)
+			return ErrStopUnconfirmed
 		}
-		if m.runtimeRelease != nil {
-			m.runtimeRelease()
-			m.runtimeRelease = nil
-		}
-		return errors.Join(closeErr, m.storeError)
+		return nil
 	case <-ctx.Done():
-		return errors.Join(closeErr, ctx.Err())
+		return ctx.Err()
 	}
 }
 
@@ -668,32 +504,35 @@ func (m *Manager) removeQueued(target *record) {
 	}
 }
 
-func (m *Manager) finishLocked(r *record, state State, code, message string) error {
-	return m.finishWithSnapshotLocked(r, r.snapshot, state, code, message)
+func (m *Manager) applySnapshotLocked(r *record, next Snapshot) {
+	before := r.snapshot
+	r.snapshot = next
+	if m.transitionObserver != nil {
+		m.transitionObserver(before, next)
+	}
 }
 
-func (m *Manager) finishWithSnapshotLocked(r *record, base Snapshot, state State, code, message string) error {
+func (m *Manager) finishLocked(r *record, state State, code, message string) {
+	m.finishWithSnapshotLocked(r, r.snapshot, state, code, message)
+}
+
+func (m *Manager) finishWithSnapshotLocked(r *record, base Snapshot, state State, code, message string) {
 	if r.snapshot.FinishedAt != nil {
-		return nil
+		return
 	}
 	next := cloneSnapshot(base)
-	next.State = state
-	next.ErrorCode = code
+	next.State, next.ErrorCode = state, code
 	next.ErrorMessage = m.limitErrorMessage(message)
 	now := time.Now().UTC()
 	next.FinishedAt = &now
-	if err := m.applySnapshotKindLocked(r, next, "end"); err != nil {
-		return err
-	}
+	m.applySnapshotLocked(r, next)
 	r.arguments = nil
-	if r.workflow != nil {
-		if err := m.workflowNodeFinishedLocked(r); err != nil {
-			return err
-		}
-	} else {
-		m.retainTerminalLocked(terminalGroup{ids: []string{r.snapshot.ID}})
+	m.terminal = append(m.terminal, r.snapshot.ID)
+	for len(m.terminal) > m.config.RetainedResults {
+		delete(m.records, m.terminal[0])
+		m.terminal[0] = ""
+		m.terminal = m.terminal[1:]
 	}
-	return nil
 }
 
 func (m *Manager) limitErrorMessage(message string) string {

@@ -7,11 +7,11 @@ import (
 	"time"
 )
 
-func TestRecorderUsesFiniteLabelsAndCommittedTransitionDurations(t *testing.T) {
+func TestRecorderUsesFiniteLabelsAndTransitionDurations(t *testing.T) {
 	recorder := &Recorder{}
 	recorder.RecordAdmission("execution", 202)
 	recorder.RecordAdmission("execution", 429)
-	recorder.RecordAdmission("workflow", 403)
+	recorder.RecordAdmission("execution", 403)
 	recorder.RecordAdmission("tenant-selected-label", 202)
 	created := time.Unix(100, 0)
 	running := created.Add(250 * time.Millisecond)
@@ -31,7 +31,7 @@ func TestRecorderUsesFiniteLabelsAndCommittedTransitionDurations(t *testing.T) {
 	for _, want := range []string{
 		`toolane_admissions_total{kind="execution",result="accepted"} 1`,
 		`toolane_admissions_total{kind="execution",result="capacity"} 1`,
-		`toolane_admissions_total{kind="workflow",result="unauthorized"} 1`,
+		`toolane_admissions_total{kind="execution",result="unauthorized"} 1`,
 		`toolane_executions_completed_total{status="succeeded"} 1`,
 		`toolane_queue_duration_seconds_sum 0.25`,
 		`toolane_execution_duration_seconds_sum 2`,

@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"sync/atomic"
@@ -21,23 +20,18 @@ import (
 	"github.com/haonox/toolane/internal/executor/mock"
 	"github.com/haonox/toolane/internal/httpapi"
 	"github.com/haonox/toolane/internal/observability"
-	"github.com/haonox/toolane/internal/store/sqlite"
 	"github.com/haonox/toolane/internal/tool"
 )
 
 type serverConfig struct {
-	Listen         string                    `json:"listen"`
-	StateDir       string                    `json:"state_dir"`
-	Tokens         []httpapi.Token           `json:"tokens"`
-	SSETenantLimit int                       `json:"sse_tenant_limit"`
-	SSEGlobalLimit int                       `json:"sse_global_limit"`
-	MetricsListen  string                    `json:"metrics_listen,omitempty"`
-	ProcessTools   []serverProcessToolConfig `json:"process_tools,omitempty"`
+	Listen        string                    `json:"listen"`
+	Tokens        []httpapi.Token           `json:"tokens"`
+	MetricsListen string                    `json:"metrics_listen,omitempty"`
+	ProcessTools  []serverProcessToolConfig `json:"process_tools,omitempty"`
 }
 
 type transitionLog struct {
 	executionID   string
-	workflowID    string
 	tenantID      string
 	fromState     execution.State
 	toState       execution.State
@@ -92,18 +86,8 @@ func loadServerConfig(path string) (serverConfig, error) {
 	if err != nil || portNumber < 0 || portNumber > 65535 {
 		return serverConfig{}, errors.New("invalid listen port")
 	}
-	if !filepath.IsAbs(config.StateDir) || len(config.Tokens) == 0 {
-		return serverConfig{}, errors.New("absolute state_dir and tokens are required")
-	}
-	defaults := httpapi.DefaultSSEOptions()
-	if config.SSETenantLimit == 0 {
-		config.SSETenantLimit = defaults.TenantLimit
-	}
-	if config.SSEGlobalLimit == 0 {
-		config.SSEGlobalLimit = defaults.GlobalLimit
-	}
-	if config.SSETenantLimit < 1 || config.SSEGlobalLimit < config.SSETenantLimit {
-		return serverConfig{}, errors.New("invalid SSE connection limits")
+	if len(config.Tokens) == 0 {
+		return serverConfig{}, errors.New("tokens are required")
 	}
 	if config.MetricsListen != "" {
 		metricsHost, metricsPort, err := net.SplitHostPort(config.MetricsListen)
@@ -135,7 +119,7 @@ func loadServerConfig(path string) (serverConfig, error) {
 	return config, nil
 }
 
-// runServer assembles the local durable service.
+// runServer assembles the local service.
 func runServer(ctx context.Context, configPath string) (retErr error) {
 	return runServerWithLogger(ctx, configPath, slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 }
@@ -158,11 +142,6 @@ func runServerWithLogger(ctx context.Context, configPath string, logger *slog.Lo
 			return err
 		}
 	}
-	store, err := sqlite.Open(ctx, config.StateDir)
-	if err != nil {
-		return err
-	}
-	defer func() { retErr = errors.Join(retErr, store.Close()) }()
 	metrics := &observability.Recorder{}
 	transitionEvents := make(chan transitionLog, 1024)
 	transitionDone := make(chan struct{})
@@ -170,7 +149,7 @@ func runServerWithLogger(ctx context.Context, configPath string, logger *slog.Lo
 	go func() {
 		defer close(transitionDone)
 		for event := range transitionEvents {
-			logger.Info("execution_transition", "execution_id", event.executionID, "workflow_id", event.workflowID,
+			logger.Info("execution_transition", "execution_id", event.executionID,
 				"tenant_id", event.tenantID, "from_state", event.fromState, "to_state", event.toState,
 				"cleanup_status", event.cleanupStatus, "error_code", event.errorCode)
 		}
@@ -182,13 +161,13 @@ func runServerWithLogger(ctx context.Context, configPath string, logger *slog.Lo
 			logger.Warn("transition_logs_dropped", "count", count)
 		}
 	}()
-	manager, err := execution.NewManager(ctx, execution.DefaultConfig(), registry, store,
+	manager, err := execution.NewManager(execution.DefaultConfig(), registry,
 		func(before, after execution.Snapshot) {
 			metrics.RecordChange(observability.Change{BeforeState: string(before.State), AfterState: string(after.State),
 				BeforeCleanup: before.CleanupStatus, AfterCleanup: after.CleanupStatus, CreatedAt: after.CreatedAt,
 				RunningAt: after.RunningAt, ProcessStartedAt: after.ProcessStartedAt, FinishedAt: after.FinishedAt})
 			if before.State != after.State || before.CleanupStatus != after.CleanupStatus {
-				event := transitionLog{executionID: after.ID, workflowID: after.WorkflowID, tenantID: after.TenantID,
+				event := transitionLog{executionID: after.ID, tenantID: after.TenantID,
 					fromState: before.State, toState: after.State, cleanupStatus: after.CleanupStatus, errorCode: after.ErrorCode}
 				select {
 				case transitionEvents <- event:
@@ -205,10 +184,7 @@ func runServerWithLogger(ctx context.Context, configPath string, logger *slog.Lo
 		defer cancel()
 		retErr = errors.Join(retErr, manager.Close(closeCtx))
 	}()
-	logger.Info("recovery_complete")
-	sseOptions := httpapi.DefaultSSEOptions()
-	sseOptions.TenantLimit, sseOptions.GlobalLimit = config.SSETenantLimit, config.SSEGlobalLimit
-	api, err := httpapi.New(manager, config.Tokens, sseOptions)
+	api, err := httpapi.New(manager, config.Tokens)
 	if err != nil {
 		return err
 	}
@@ -230,7 +206,7 @@ func runServerWithLogger(ctx context.Context, configPath string, logger *slog.Lo
 		metricsMux := http.NewServeMux()
 		metricsMux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
 			stats := manager.Stats()
-			gauges := observability.Gauges{Queued: stats.Queued, Blocked: stats.Blocked, Pending: stats.Pending, Running: stats.Running,
+			gauges := observability.Gauges{Queued: stats.Queued, Pending: stats.Pending, Running: stats.Running,
 				Stored: stats.Stored, Goroutines: runtime.NumGoroutine(), Halted: stats.Halted}
 			var output bytes.Buffer
 			if err := metrics.WritePrometheus(&output, gauges); err != nil {

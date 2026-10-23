@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 
-TERMINAL = {"succeeded", "failed", "timed_out", "cancelled", "skipped", "interrupted"}
+TERMINAL = {"succeeded", "failed", "timed_out", "cancelled"}
 EXECUTION_ID = re.compile(r"[0-9a-f]{32}\Z")
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
@@ -61,17 +61,12 @@ class ToolaneClient:
         # Keep the local credential away from ambient proxy settings and redirects.
         self.opener = build_opener(ProxyHandler({}), NoRedirect())
 
-    def request(self, method, path, body=None, idempotency_key=None):
+    def request(self, method, path, body=None):
         headers = {"Authorization": "Bearer " + self.token, "Accept": "application/json"}
         data = None
         if body is not None:
             headers["Content-Type"] = "application/json"
             data = json.dumps(body, separators=(",", ":")).encode("utf-8")
-        if idempotency_key is not None:
-            if (not 1 <= len(idempotency_key) <= 128 or "," in idempotency_key or
-                    any(ord(char) < 33 or ord(char) > 126 for char in idempotency_key)):
-                raise ValueError("idempotency key must be 1..128 printable ASCII characters without commas")
-            headers["Idempotency-Key"] = idempotency_key
         request = Request(self.base_url + path, data=data, headers=headers, method=method)
         try:
             with self.opener.open(request, timeout=self.timeout_seconds) as response:
@@ -101,21 +96,21 @@ class ToolaneClient:
             raise ToolaneError("service returned an unexpected response")
         return result
 
-    def submit_mock(self, delay_ms, value, idempotency_key=None):
+    def submit_mock(self, delay_ms, value):
         return self.request("POST", "/api/v1/executions", {
             "agent_id": "python-example", "tool": "mock.delay",
             "arguments": {"delay_ms": delay_ms, "value": value},
-        }, idempotency_key)
+        })
 
     def list_tools(self):
         return self.request("GET", "/api/v1/tools")
 
-    def submit_tool(self, name, arguments, idempotency_key=None):
+    def submit_tool(self, name, arguments):
         if not isinstance(name, str) or not name or not isinstance(arguments, dict):
             raise ValueError("tool name and JSON object arguments are required")
         return self.request("POST", "/api/v1/executions", {
             "agent_id": "python-example", "tool": name, "arguments": arguments,
-        }, idempotency_key)
+        })
 
     def get_execution(self, execution_id):
         return self.request("GET", execution_path(execution_id))
@@ -135,7 +130,6 @@ def main(argv=None):
     run = commands.add_parser("run", help="submit mock.delay and wait for its result")
     run.add_argument("--delay-ms", type=int, default=100)
     run.add_argument("--value", default="hello from Python")
-    run.add_argument("--idempotency-key")
     run.add_argument("--wait-seconds", type=float, default=20)
     run.add_argument("--poll-seconds", type=float, default=0.2)
     get = commands.add_parser("get", help="query an execution")
@@ -155,7 +149,7 @@ def main(argv=None):
         if args.command == "cancel":
             print_json(client.cancel_execution(args.execution_id))
             return 0
-        accepted = client.submit_mock(args.delay_ms, args.value, args.idempotency_key)
+        accepted = client.submit_mock(args.delay_ms, args.value)
         execution_id = accepted.get("execution_id")
         if not isinstance(execution_id, str) or not EXECUTION_ID.fullmatch(execution_id):
             raise ToolaneError("accepted response has no valid execution ID")

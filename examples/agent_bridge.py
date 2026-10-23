@@ -35,8 +35,6 @@ def invoke_tool_call(client, call_id, name, arguments, wait_seconds=20):
                 payload = {"execution_id": execution_id, "status": status,
                            "error_code": snapshot.get("error_code"),
                            "error_message": snapshot.get("error_message")}
-                if status == "interrupted":
-                    payload["result_unknown"] = True
             return {"call_id": call_id, "output": json.dumps(payload, ensure_ascii=False)}
         remaining = deadline - time.monotonic()
         if remaining <= 0:

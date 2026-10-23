@@ -7,14 +7,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/haonox/toolane/internal/execution"
 	"github.com/haonox/toolane/internal/executor/mock"
-	"github.com/haonox/toolane/internal/store/sqlite"
 	"github.com/haonox/toolane/internal/tool"
 )
 
@@ -25,16 +23,11 @@ const (
 
 func apiFixture(t *testing.T) *API {
 	t.Helper()
-	ctx := context.Background()
-	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "state"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	registry := tool.NewRegistry()
 	if err := registry.Register(mock.Definition()); err != nil {
 		t.Fatal(err)
 	}
-	manager, err := execution.NewManager(ctx, execution.DefaultConfig(), registry, store)
+	manager, err := execution.NewManager(execution.DefaultConfig(), registry)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,9 +35,6 @@ func apiFixture(t *testing.T) *API {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		if err := manager.Close(closeCtx); err != nil {
-			t.Error(err)
-		}
-		if err := store.Close(); err != nil {
 			t.Error(err)
 		}
 	})
@@ -58,15 +48,13 @@ func apiFixture(t *testing.T) *API {
 	return api
 }
 
-func request(t *testing.T, api *API, method, path, token, body, key string) *httptest.ResponseRecorder {
+func request(t *testing.T, api *API, method, path, token, body string, _ string) *httptest.ResponseRecorder {
 	t.Helper()
 	r := httptest.NewRequest(method, path, strings.NewReader(body))
 	if token != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
 	}
-	if key != "" {
-		r.Header.Set("Idempotency-Key", key)
-	}
+
 	w := httptest.NewRecorder()
 	api.ServeHTTP(w, r)
 	if w.Header().Get("X-Request-ID") == "" {
@@ -114,21 +102,6 @@ func TestStructuredRequestLogsKeepIdentityAndExcludePayload(t *testing.T) {
 		case <-time.After(time.Millisecond):
 		}
 	}
-	if got := request(t, api, "GET", path+"/events", firstToken, "", ""); got.Code != http.StatusOK || !strings.Contains(got.Body.String(), "event: end\n") {
-		t.Fatalf("logged SSE response: %d %s", got.Code, got.Body.String())
-	}
-	workflow := request(t, api, "POST", "/api/v1/workflows", firstToken,
-		`{"nodes":[{"node_id":"first","tool":"mock.delay","arguments":{"delay_ms":0,"value":"`+secret+`"}}]}`, "")
-	if workflow.Code != http.StatusAccepted {
-		t.Fatalf("workflow admission status: %d %s", workflow.Code, workflow.Body.String())
-	}
-	var createdWorkflow workflowView
-	if err := json.Unmarshal(workflow.Body.Bytes(), &createdWorkflow); err != nil {
-		t.Fatal(err)
-	}
-	if createdWorkflow.ID == "" {
-		t.Fatal("accepted workflow has no ID")
-	}
 	text := output.String()
 	for _, forbidden := range []string{firstToken, secondToken, secret, "wrong-secret-123456"} {
 		if strings.Contains(text, forbidden) {
@@ -143,11 +116,10 @@ func TestStructuredRequestLogsKeepIdentityAndExcludePayload(t *testing.T) {
 		}
 		entries = append(entries, entry)
 	}
-	if len(entries) != 6 || entries[0]["error_code"] != "unauthorized" || entries[0]["tenant_id"] != nil ||
+	if len(entries) != 4 || entries[0]["error_code"] != "unauthorized" || entries[0]["tenant_id"] != nil ||
 		entries[1]["tenant_id"] != "first" || entries[1]["execution_id"] != created.ID ||
 		entries[2]["tenant_id"] != "second" || entries[2]["execution_id"] != nil ||
-		entries[3]["route"] != "GET /api/v1/executions/{id}" || entries[4]["http_status"] != float64(http.StatusOK) ||
-		entries[5]["workflow_id"] != createdWorkflow.ID {
+		entries[3]["route"] != "GET /api/v1/executions/{id}" {
 		t.Fatalf("unexpected request log fields: %+v", entries)
 	}
 }
@@ -203,50 +175,6 @@ func TestHTTPAuthorizationAndTenantIsolation(t *testing.T) {
 	}
 }
 
-func TestHTTPWorkflowIsolationAndIdempotency(t *testing.T) {
-	api := apiFixture(t)
-	body := `{"nodes":[{"node_id":"a","tool":"mock.delay","arguments":{"delay_ms":1}},{"node_id":"b","depends_on":["a"],"tool":"mock.delay","arguments":{"delay_ms":1}}]}`
-	first := request(t, api, "POST", "/api/v1/workflows", firstToken, body, "workflow-key")
-	if first.Code != http.StatusAccepted {
-		t.Fatalf("workflow submit: %d %s", first.Code, first.Body.String())
-	}
-	var result struct {
-		WorkflowID string `json:"workflow_id"`
-		Nodes      []struct {
-			Limits struct {
-				QueueTimeoutMS int64 `json:"queue_timeout_ms"`
-			} `json:"limits"`
-		} `json:"nodes"`
-	}
-	if err := json.Unmarshal(first.Body.Bytes(), &result); err != nil || result.WorkflowID == "" || len(result.Nodes) != 2 || result.Nodes[0].Limits.QueueTimeoutMS != 30000 {
-		t.Fatalf("workflow response: %+v err=%v", result, err)
-	}
-	replay := request(t, api, "POST", "/api/v1/workflows", firstToken, body, "workflow-key")
-	var replayed struct {
-		WorkflowID string `json:"workflow_id"`
-	}
-	if err := json.Unmarshal(replay.Body.Bytes(), &replayed); err != nil || replay.Code != http.StatusAccepted || replayed.WorkflowID != result.WorkflowID {
-		t.Fatalf("workflow replay: %d %+v err=%v", replay.Code, replayed, err)
-	}
-	conflict := request(t, api, "POST", "/api/v1/workflows", firstToken, strings.Replace(body, `"delay_ms":1`, `"delay_ms":2`, 1), "workflow-key")
-	if conflict.Code != http.StatusConflict {
-		t.Fatalf("workflow key conflict: %d %s", conflict.Code, conflict.Body.String())
-	}
-	path := "/api/v1/workflows/" + result.WorkflowID
-	for _, methodPath := range []struct{ method, path string }{{"GET", path}, {"POST", path + "/cancel"}} {
-		got := request(t, api, methodPath.method, methodPath.path, secondToken, "", "")
-		if got.Code != http.StatusNotFound {
-			t.Fatalf("cross-tenant workflow %s %s: %d %s", methodPath.method, methodPath.path, got.Code, got.Body.String())
-		}
-	}
-	if got := request(t, api, "GET", path, firstToken, "", ""); got.Code != http.StatusOK {
-		t.Fatalf("same-tenant workflow get: %d %s", got.Code, got.Body.String())
-	}
-	if got := request(t, api, "POST", path+"/cancel", firstToken, "", ""); got.Code != http.StatusOK && got.Code != http.StatusAccepted {
-		t.Fatalf("same-tenant workflow cancel: %d %s", got.Code, got.Body.String())
-	}
-}
-
 func TestHTTPJSONLimitAndValidation(t *testing.T) {
 	api := apiFixture(t)
 	tooLarge := `{"tool":"mock.delay","arguments":{"value":"` + strings.Repeat("a", maxJSONBytes) + `"}}`
@@ -258,26 +186,7 @@ func TestHTTPJSONLimitAndValidation(t *testing.T) {
 			t.Fatalf("invalid JSON %q: %d %s", body, got.Code, got.Body.String())
 		}
 	}
-	valid := request(t, api, "POST", "/api/v1/executions", firstToken, `{"tool":"mock.delay","arguments":{"delay_ms":1}}`, "single-key")
-	if valid.Code != http.StatusAccepted {
-		t.Fatalf("single submit: %d %s", valid.Code, valid.Body.String())
-	}
-	replay := request(t, api, "POST", "/api/v1/executions", firstToken, `{"tool":"mock.delay","arguments":{"delay_ms":1}}`, "single-key")
-	var a, b struct {
-		ExecutionID string `json:"execution_id"`
-	}
-	_ = json.Unmarshal(valid.Body.Bytes(), &a)
-	_ = json.Unmarshal(replay.Body.Bytes(), &b)
-	if replay.Code != http.StatusAccepted || a.ExecutionID == "" || a.ExecutionID != b.ExecutionID {
-		t.Fatalf("single replay: %d original=%+v replay=%+v", replay.Code, a, b)
-	}
-	conflict := request(t, api, "POST", "/api/v1/executions", firstToken, `{"tool":"mock.delay","arguments":{"delay_ms":2}}`, "single-key")
-	if conflict.Code != http.StatusConflict {
-		t.Fatalf("single key conflict: %d %s", conflict.Code, conflict.Body.String())
-	}
-	if bytes.Contains(conflict.Body.Bytes(), []byte("single-key")) {
-		t.Fatal("error response leaked idempotency key")
-	}
+
 }
 
 func TestHTTPRoutingErrorsHaveRequestID(t *testing.T) {

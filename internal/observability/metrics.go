@@ -9,9 +9,9 @@ import (
 )
 
 var (
-	admissionKinds   = [...]string{"execution", "workflow"}
-	admissionResults = [...]string{"accepted", "invalid", "unauthorized", "conflict", "capacity", "unavailable", "other"}
-	terminalStates   = [...]string{"succeeded", "failed", "timed_out", "cancelled", "skipped", "interrupted"}
+	admissionKinds   = [...]string{"execution"}
+	admissionResults = [...]string{"accepted", "invalid", "unauthorized", "capacity", "unavailable", "other"}
+	terminalStates   = [...]string{"succeeded", "failed", "timed_out", "cancelled"}
 	durationBuckets  = [...]float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60}
 )
 
@@ -35,8 +35,7 @@ func (h *durationHistogram) observe(duration time.Duration) {
 	}
 }
 
-// Change describes one committed execution snapshot transition. Its values
-// must be supplied only after the durable state write has succeeded.
+// Change describes one execution snapshot transition.
 type Change struct {
 	BeforeState, AfterState     string
 	BeforeCleanup, AfterCleanup string
@@ -48,9 +47,9 @@ type Change struct {
 
 // Gauges are live values gathered immediately before rendering.
 type Gauges struct {
-	Queued, Blocked, Pending, Running, Stored int
-	Goroutines                                int
-	Halted                                    bool
+	Queued, Pending, Running, Stored int
+	Goroutines                       int
+	Halted                           bool
 }
 
 // Recorder stores a fixed number of counters and histogram buckets. It never
@@ -87,8 +86,6 @@ func (r *Recorder) RecordAdmission(kind string, status int) {
 		result = "invalid"
 	case status == 401 || status == 403:
 		result = "unauthorized"
-	case status == 409:
-		result = "conflict"
 	case status == 429:
 		result = "capacity"
 	case status == 503:
@@ -175,7 +172,7 @@ func (r *Recorder) WritePrometheus(w io.Writer, gauges Gauges) error {
 	for _, item := range []struct {
 		name  string
 		value any
-	}{{"queued", gauges.Queued}, {"blocked", gauges.Blocked}, {"pending", gauges.Pending}, {"running", gauges.Running}, {"stored", gauges.Stored},
+	}{{"queued", gauges.Queued}, {"pending", gauges.Pending}, {"running", gauges.Running}, {"stored", gauges.Stored},
 		{"goroutines", gauges.Goroutines}, {"halted", boolInt(gauges.Halted)}} {
 		if err := write("# TYPE toolane_%s gauge\ntoolane_%s %v\n", item.name, item.name, item.value); err != nil {
 			return err

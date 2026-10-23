@@ -11,9 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -71,7 +69,7 @@ func processTestConfig(t *testing.T, dir, address string) string {
 			Args:         []processArgumentConfig{literal("-test.run=^TestProcessHTTPHelper$"), literal("--"), literal(mode), {Parameter: "value"}, {ExecutionID: true}},
 			RunTimeoutMS: 3000}
 	}
-	config := serverConfig{Listen: address, StateDir: filepath.Join(dir, "state"),
+	config := serverConfig{Listen: address,
 		ProcessTools: []serverProcessToolConfig{toolConfig("test.echo", "echo"), toolConfig("test.slow", "slow")},
 		Tokens: []httpapi.Token{{Value: "tenant-a-secret-123456", TenantID: "tenantA", Tools: []string{"test.echo"}},
 			{Value: "tenant-b-secret-123456", TenantID: "tenantB", Tools: []string{"test.echo", "test.slow"}}}}
@@ -142,7 +140,7 @@ func startProcessTestServer(t *testing.T, configPath, address string) (string, *
 	return base, client, stop
 }
 
-func processRequest(t *testing.T, client *http.Client, method, url, token, body, key string) (int, []byte) {
+func processRequest(t *testing.T, client *http.Client, method, url, token, body string, _ string) (int, []byte) {
 	t.Helper()
 	request, err := http.NewRequest(method, url, strings.NewReader(body))
 	if err != nil {
@@ -152,9 +150,7 @@ func processRequest(t *testing.T, client *http.Client, method, url, token, body,
 	if body != "" {
 		request.Header.Set("Content-Type", "application/json")
 	}
-	if key != "" {
-		request.Header.Set("Idempotency-Key", key)
-	}
+
 	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -167,9 +163,9 @@ func processRequest(t *testing.T, client *http.Client, method, url, token, body,
 	return response.StatusCode, raw
 }
 
-func processSubmit(t *testing.T, client *http.Client, base, token, body, key string) execution.Snapshot {
+func processSubmit(t *testing.T, client *http.Client, base, token, body string, _ string) execution.Snapshot {
 	t.Helper()
-	status, raw := processRequest(t, client, http.MethodPost, base+"/api/v1/executions", token, body, key)
+	status, raw := processRequest(t, client, http.MethodPost, base+"/api/v1/executions", token, body, "")
 	if status != http.StatusAccepted {
 		t.Fatalf("submit status=%d body=%s", status, raw)
 	}
@@ -229,11 +225,7 @@ func TestConfiguredProcessToolsThroughHTTP(t *testing.T) {
 		t.Fatalf("unauthorized tool status=%d body=%s", status, raw)
 	}
 	for _, token := range []string{"tenant-a-secret-123456", "tenant-b-secret-123456"} {
-		accepted := processSubmit(t, client, base, token, `{"tool":"test.echo","arguments":{"value":"hello"}}`, "same-key")
-		duplicate := processSubmit(t, client, base, token, `{"tool":"test.echo","arguments":{"value":"hello"}}`, "same-key")
-		if duplicate.ID != accepted.ID {
-			t.Fatalf("idempotency changed execution: %s %s", accepted.ID, duplicate.ID)
-		}
+		accepted := processSubmit(t, client, base, token, `{"tool":"test.echo","arguments":{"value":"hello"}}`, "")
 		final := awaitProcessSnapshot(t, client, base, token, accepted.ID, func(s execution.Snapshot) bool { return s.FinishedAt != nil })
 		var result map[string]string
 		if final.State != execution.Succeeded || json.Unmarshal(final.Result, &result) != nil || result["value"] != "hello" || result["execution_id"] != accepted.ID {
@@ -310,96 +302,5 @@ func TestConfiguredProcessToolFailsClosedAtStartup(t *testing.T) {
 		if _, err := loadServerConfig(path); err == nil {
 			t.Errorf("%s accepted", name)
 		}
-	}
-}
-
-func TestProcessServerCrashChild(t *testing.T) {
-	if os.Getenv("TOOLANE_PROCESS_SERVER_CHILD") != "1" {
-		return
-	}
-	if err := runServer(context.Background(), os.Getenv("TOOLANE_PROCESS_SERVER_CONFIG")); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(2)
-	}
-}
-
-// A killed service cannot infer that its child stopped or that its side effect
-// did not happen. The fixture uses a separate ledger to demonstrate the gap.
-func TestConfiguredProcessCrashMarksResultUnknown(t *testing.T) {
-	dir := t.TempDir()
-	address := processTestAddress(t)
-	configPath := processTestConfig(t, dir, address)
-	child := exec.Command(os.Args[0], "-test.run=^TestProcessServerCrashChild$")
-	child.Env = append(os.Environ(), "TOOLANE_PROCESS_SERVER_CHILD=1", "TOOLANE_PROCESS_SERVER_CONFIG="+configPath)
-	child.Stdout, child.Stderr = io.Discard, io.Discard
-	if err := child.Start(); err != nil {
-		t.Fatal(err)
-	}
-	childDone := make(chan error, 1)
-	go func() { childDone <- child.Wait() }()
-	t.Cleanup(func() { _ = child.Process.Kill() })
-	client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 3 * time.Second}
-	base := "http://" + address
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		response, err := client.Get(base + "/readyz")
-		if err == nil {
-			_ = response.Body.Close()
-			if response.StatusCode == http.StatusOK {
-				break
-			}
-		}
-		select {
-		case serviceErr := <-childDone:
-			t.Fatalf("child service failed: %v", serviceErr)
-		default:
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("child service not ready: %v", err)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	accepted := processSubmit(t, client, base, "tenant-b-secret-123456", `{"tool":"test.slow","arguments":{"value":"after-crash"}}`, "")
-	readyPath := filepath.Join(dir, "process-ready")
-	var pid int
-	deadline = time.Now().Add(3 * time.Second)
-	for {
-		raw, err := os.ReadFile(readyPath)
-		if err == nil {
-			pid, err = strconv.Atoi(string(raw))
-			if err == nil && pid > 0 {
-				break
-			}
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("tool did not start: %v", err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Cleanup(func() { _ = syscall.Kill(-pid, syscall.SIGKILL) })
-	if err := child.Process.Kill(); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-childDone:
-	case <-time.After(3 * time.Second):
-		t.Fatal("killed service did not exit")
-	}
-	restartedBase, restartedClient, stop := startProcessTestServer(t, configPath, address)
-	t.Cleanup(stop)
-	recovered := processSnapshot(t, restartedClient, restartedBase, "tenant-b-secret-123456", accepted.ID)
-	if recovered.State != execution.Interrupted || recovered.ErrorCode != "service_restarted" || recovered.Result != nil {
-		t.Fatalf("crash was treated as a known execution result: %+v", recovered)
-	}
-	deadline = time.Now().Add(3 * time.Second)
-	for {
-		ledger, err := os.ReadFile(filepath.Join(dir, "ledger"))
-		if err == nil && strings.Contains(string(ledger), accepted.ID) {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("child side effect was not observed after service crash: %v", err)
-		}
-		time.Sleep(20 * time.Millisecond)
 	}
 }

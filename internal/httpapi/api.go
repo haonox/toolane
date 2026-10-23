@@ -9,18 +9,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"math"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/haonox/toolane/internal/execution"
 	"github.com/haonox/toolane/internal/observability"
-	"github.com/haonox/toolane/internal/store/sqlite"
 	"github.com/haonox/toolane/internal/tool"
 )
 
@@ -45,7 +42,6 @@ type requestTraceKey struct{}
 type requestTrace struct {
 	tenantID    string
 	executionID string
-	workflowID  string
 	errorCode   string
 }
 
@@ -61,29 +57,14 @@ type API struct {
 	logger      *slog.Logger
 	tokens      map[[32]byte]principal
 	mux         *http.ServeMux
-	sseOptions  SSEOptions
-	sseMu       sync.Mutex
-	sseTotal    int
-	sseTenants  map[string]int
 	toolCatalog []tool.PublicDefinition
 }
 
-func New(manager *execution.Manager, tokens []Token, options ...SSEOptions) (*API, error) {
+func New(manager *execution.Manager, tokens []Token) (*API, error) {
 	if manager == nil || len(tokens) == 0 {
 		return nil, errors.New("HTTP API requires a manager and at least one token")
 	}
-	if len(options) > 1 {
-		return nil, errors.New("at most one SSE options value is allowed")
-	}
-	sseOptions := DefaultSSEOptions()
-	if len(options) == 1 {
-		sseOptions = options[0]
-	}
-	if err := sseOptions.validate(); err != nil {
-		return nil, err
-	}
-	a := &API{manager: manager, tokens: make(map[[32]byte]principal, len(tokens)), mux: http.NewServeMux(),
-		sseOptions: sseOptions, sseTenants: make(map[string]int)}
+	a := &API{manager: manager, tokens: make(map[[32]byte]principal, len(tokens)), mux: http.NewServeMux()}
 	for _, token := range tokens {
 		if len(token.Value) < 16 || len(token.Value) > 4096 || !printableToken(token.Value) || !validTenantID(token.TenantID) || len(token.Tools) == 0 {
 			return nil, errors.New("invalid HTTP token configuration")
@@ -106,18 +87,11 @@ func New(manager *execution.Manager, tokens []Token, options ...SSEOptions) (*AP
 	a.mux.HandleFunc("POST /api/v1/executions", a.observeAdmission("execution", a.withPrincipal(a.submitExecution)))
 	a.mux.HandleFunc("GET /api/v1/tools", a.withPrincipal(a.listTools))
 	a.mux.HandleFunc("GET /api/v1/executions/{id}", a.withPrincipal(a.getExecution))
-	a.mux.HandleFunc("GET /api/v1/executions/{id}/events", a.withPrincipal(a.streamExecution))
 	a.mux.HandleFunc("POST /api/v1/executions/{id}/cancel", a.withPrincipal(a.cancelExecution))
-	a.mux.HandleFunc("POST /api/v1/workflows", a.observeAdmission("workflow", a.withPrincipal(a.submitWorkflow)))
-	a.mux.HandleFunc("GET /api/v1/workflows/{id}", a.withPrincipal(a.getWorkflow))
-	a.mux.HandleFunc("POST /api/v1/workflows/{id}/cancel", a.withPrincipal(a.cancelWorkflow))
 	for pattern, allowed := range map[string]string{
 		"/healthz": "GET", "/readyz": "GET",
 		"/api/v1/executions": "POST", "/api/v1/tools": "GET", "/api/v1/executions/{id}": "GET",
-		"/api/v1/executions/{id}/events": "GET",
 		"/api/v1/executions/{id}/cancel": "POST",
-		"/api/v1/workflows":              "POST", "/api/v1/workflows/{id}": "GET",
-		"/api/v1/workflows/{id}/cancel": "POST",
 	} {
 		a.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Allow", allowed)
@@ -255,9 +229,6 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if trace.executionID != "" {
 		attrs = append(attrs, "execution_id", trace.executionID)
 	}
-	if trace.workflowID != "" {
-		attrs = append(attrs, "workflow_id", trace.workflowID)
-	}
 	if trace.errorCode != "" {
 		attrs = append(attrs, "error_code", trace.errorCode)
 	}
@@ -297,19 +268,6 @@ type executionInput struct {
 	OutputLimitBytes   int             `json:"output_limit_bytes"`
 }
 
-type workflowInput struct {
-	Nodes []struct {
-		ID                 string          `json:"node_id"`
-		DependsOn          []string        `json:"depends_on"`
-		AgentID            string          `json:"agent_id"`
-		Tool               string          `json:"tool"`
-		Arguments          json.RawMessage `json:"arguments"`
-		QueueTimeoutMS     int64           `json:"queue_timeout_ms"`
-		ExecutionTimeoutMS int64           `json:"execution_timeout_ms"`
-		OutputLimitBytes   int             `json:"output_limit_bytes"`
-	} `json:"nodes"`
-}
-
 func decodeBody(w http.ResponseWriter, r *http.Request, value any) error {
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxJSONBytes))
 	var raw json.RawMessage
@@ -337,17 +295,6 @@ func timeout(ms int64) (time.Duration, error) {
 	return time.Duration(ms) * time.Millisecond, nil
 }
 
-func idempotencyKey(r *http.Request) (string, error) {
-	values := r.Header.Values("Idempotency-Key")
-	if len(values) == 0 {
-		return "", nil
-	}
-	if len(values) != 1 || len(values[0]) == 0 || len(values[0]) > 128 || !printableToken(values[0]) || strings.Contains(values[0], ",") {
-		return "", errors.New("invalid Idempotency-Key")
-	}
-	return values[0], nil
-}
-
 func (a *API) submitExecution(w http.ResponseWriter, r *http.Request, p principal) {
 	var input executionInput
 	if err := decodeBody(w, r, &input); err != nil {
@@ -368,19 +315,9 @@ func (a *API) submitExecution(w http.ResponseWriter, r *http.Request, p principa
 		writeInputError(w, r, err)
 		return
 	}
-	key, err := idempotencyKey(r)
-	if err != nil {
-		writeInputError(w, r, err)
-		return
-	}
 	req := execution.Request{TenantID: p.tenantID, AgentID: input.AgentID, Tool: input.Tool, Arguments: input.Arguments,
 		QueueTimeout: queueTimeout, ExecutionTimeout: runTimeout, OutputLimitBytes: input.OutputLimitBytes}
-	var snapshot execution.Snapshot
-	if key == "" {
-		snapshot, err = a.manager.Submit(r.Context(), req)
-	} else {
-		snapshot, err = a.manager.SubmitIdempotent(r.Context(), req, key)
-	}
+	snapshot, err := a.manager.Submit(r.Context(), req)
 	if err != nil {
 		a.managerError(w, r, err)
 		return
@@ -400,19 +337,6 @@ func viewExecution(snapshot execution.Snapshot) executionView {
 	return executionView{snapshot, limitsOf(snapshot)}
 }
 
-type workflowView struct {
-	execution.WorkflowSnapshot
-	Nodes []executionView `json:"nodes"`
-}
-
-func viewWorkflow(snapshot execution.WorkflowSnapshot) workflowView {
-	view := workflowView{WorkflowSnapshot: snapshot, Nodes: make([]executionView, len(snapshot.Nodes))}
-	for i, node := range snapshot.Nodes {
-		view.Nodes[i] = viewExecution(node)
-	}
-	return view
-}
-
 type executionLimits struct {
 	QueueTimeoutMS     int64 `json:"queue_timeout_ms"`
 	ExecutionTimeoutMS int64 `json:"execution_timeout_ms"`
@@ -424,53 +348,6 @@ type executionLimits struct {
 func limitsOf(s execution.Snapshot) executionLimits {
 	return executionLimits{int64(s.QueueTimeout / time.Millisecond), int64(s.ExecutionTimeout / time.Millisecond),
 		s.OutputLimitBytes, s.ArgumentLimitBytes, s.ResultLimitBytes}
-}
-
-func (a *API) submitWorkflow(w http.ResponseWriter, r *http.Request, p principal) {
-	var input workflowInput
-	if err := decodeBody(w, r, &input); err != nil {
-		writeInputError(w, r, err)
-		return
-	}
-	key, err := idempotencyKey(r)
-	if err != nil {
-		writeInputError(w, r, err)
-		return
-	}
-	req := execution.WorkflowRequest{TenantID: p.tenantID, Nodes: make([]execution.WorkflowNode, len(input.Nodes))}
-	for i, node := range input.Nodes {
-		if !p.tools[node.Tool] {
-			writeError(w, r, http.StatusForbidden, "tool_forbidden", "tool is not enabled for this tenant")
-			return
-		}
-		queueTimeout, err := timeout(node.QueueTimeoutMS)
-		if err != nil {
-			writeInputError(w, r, fmt.Errorf("node %q: %w", node.ID, err))
-			return
-		}
-		runTimeout, err := timeout(node.ExecutionTimeoutMS)
-		if err != nil {
-			writeInputError(w, r, fmt.Errorf("node %q: %w", node.ID, err))
-			return
-		}
-		req.Nodes[i] = execution.WorkflowNode{ID: node.ID, DependsOn: node.DependsOn, AgentID: node.AgentID,
-			Tool: node.Tool, Arguments: node.Arguments, QueueTimeout: queueTimeout, ExecutionTimeout: runTimeout,
-			OutputLimitBytes: node.OutputLimitBytes}
-	}
-	var snapshot execution.WorkflowSnapshot
-	if key == "" {
-		snapshot, err = a.manager.SubmitWorkflow(r.Context(), req)
-	} else {
-		snapshot, err = a.manager.SubmitWorkflowIdempotent(r.Context(), req, key)
-	}
-	if err != nil {
-		a.managerError(w, r, err)
-		return
-	}
-	if trace := traceOf(r); trace != nil {
-		trace.workflowID = snapshot.ID
-	}
-	writeJSON(w, http.StatusAccepted, viewWorkflow(snapshot))
 }
 
 func (a *API) getExecution(w http.ResponseWriter, r *http.Request, p principal) {
@@ -515,48 +392,6 @@ func (a *API) cancelExecution(w http.ResponseWriter, r *http.Request, p principa
 	writeJSON(w, status, viewExecution(snapshot))
 }
 
-func (a *API) getWorkflow(w http.ResponseWriter, r *http.Request, p principal) {
-	snapshot, err := a.manager.GetWorkflow(r.PathValue("id"))
-	if err != nil {
-		a.managerError(w, r, err)
-		return
-	}
-	if snapshot.TenantID != p.tenantID {
-		writeError(w, r, http.StatusNotFound, "not_found", "workflow not found")
-		return
-	}
-	if trace := traceOf(r); trace != nil {
-		trace.workflowID = snapshot.ID
-	}
-	writeJSON(w, http.StatusOK, viewWorkflow(snapshot))
-}
-
-func (a *API) cancelWorkflow(w http.ResponseWriter, r *http.Request, p principal) {
-	id := r.PathValue("id")
-	before, err := a.manager.GetWorkflow(id)
-	if err != nil {
-		a.managerError(w, r, err)
-		return
-	}
-	if before.TenantID != p.tenantID {
-		writeError(w, r, http.StatusNotFound, "not_found", "workflow not found")
-		return
-	}
-	if trace := traceOf(r); trace != nil {
-		trace.workflowID = before.ID
-	}
-	snapshot, err := a.manager.CancelWorkflow(id)
-	if err != nil {
-		a.managerError(w, r, err)
-		return
-	}
-	status := http.StatusOK
-	if snapshot.State == execution.Cancelling {
-		status = http.StatusAccepted
-	}
-	writeJSON(w, status, viewWorkflow(snapshot))
-}
-
 func (a *API) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -574,9 +409,7 @@ func (a *API) managerError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, execution.ErrNotFound):
 		writeError(w, r, http.StatusNotFound, "not_found", "resource not found")
-	case errors.Is(err, sqlite.ErrIdempotencyConflict):
-		writeError(w, r, http.StatusConflict, "idempotency_conflict", "idempotency key conflicts with original request")
-	case errors.Is(err, execution.ErrQueueFull), errors.Is(err, execution.ErrTenantQueueFull), errors.Is(err, sqlite.ErrRetentionCapacity):
+	case errors.Is(err, execution.ErrQueueFull), errors.Is(err, execution.ErrTenantQueueFull):
 		w.Header().Set("Retry-After", "1")
 		writeError(w, r, http.StatusTooManyRequests, "capacity_exhausted", "admission capacity exhausted")
 	case errors.Is(err, execution.ErrBackendUnavailable), errors.Is(err, execution.ErrClosed), a.manager.Stats().Halted:

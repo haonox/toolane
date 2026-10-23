@@ -4,13 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/haonox/toolane/internal/store/sqlite"
 	"github.com/haonox/toolane/internal/tool"
 )
 
@@ -32,13 +30,7 @@ func testManager(t *testing.T, config Config, execute func(context.Context, json
 
 func newTestManagerWithRegistry(t *testing.T, config Config, registry *tool.Registry) *Manager {
 	t.Helper()
-	store := openDurableStore(t, filepath.Join(t.TempDir(), "state"))
-	t.Cleanup(func() {
-		if err := store.Close(); err != nil {
-			t.Errorf("close store: %v", err)
-		}
-	})
-	m, err := NewManager(context.Background(), config, registry, store)
+	m, err := NewManager(config, registry)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,8 +342,6 @@ func TestToolPolicyClipsInheritedDefaultsAndRejectsGlobalOverrun(t *testing.T) {
 		}
 	}
 	config := DefaultConfig()
-	store := openDurableStore(t, filepath.Join(t.TempDir(), "state"))
-	defer store.Close()
 	for _, policy := range []tool.Policy{
 		{MaxQueueTimeout: config.MaxQueueTimeout + time.Second},
 		{DefaultRunTimeout: config.MaxRunTimeout + time.Second},
@@ -363,7 +353,7 @@ func TestToolPolicyClipsInheritedDefaultsAndRejectsGlobalOverrun(t *testing.T) {
 		if err := registry.Register(definition(policy)); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := newManager(config, registry, store); err == nil {
+		if _, err := NewManager(config, registry); err == nil {
 			t.Fatalf("policy above global limit accepted: %+v", policy)
 		}
 	}
@@ -386,7 +376,6 @@ func TestToolPolicyClipsInheritedDefaultsAndRejectsGlobalOverrun(t *testing.T) {
 func TestTerminalRetention(t *testing.T) {
 	config := DefaultConfig()
 	config.RetainedResults = 1
-	config.DurableRecordLimit = 1
 	m := testManager(t, config, func(context.Context, json.RawMessage) (json.RawMessage, error) {
 		return json.RawMessage(`{"ok":true}`), nil
 	})
@@ -486,8 +475,7 @@ func TestUnconfirmedStopKeepsReservationAndHaltsAdmission(t *testing.T) {
 	config := DefaultConfig()
 	config.Workers = 1
 	config.MaxErrorMessageBytes = 32
-	store := openDurableStore(t, filepath.Join(t.TempDir(), "state"))
-	m, err := NewManager(context.Background(), config, registry, store)
+	m, err := NewManager(config, registry)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,8 +505,5 @@ func TestUnconfirmedStopKeepsReservationAndHaltsAdmission(t *testing.T) {
 	defer cancel()
 	if err := m.Close(ctx); !errors.Is(err, ErrStopUnconfirmed) {
 		t.Fatalf("close with unresolved process = %v", err)
-	}
-	if err := store.Close(); !errors.Is(err, sqlite.ErrRuntimeOwned) {
-		t.Fatalf("store closed while stop is unconfirmed: %v", err)
 	}
 }
