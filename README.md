@@ -69,6 +69,8 @@ flowchart TD
 
 [架构与执行语义](docs/architecture.md)
 
+[独立 HTTP 压测目录与加压方案](benchmarks/README.md)
+
 ## 快速开始
 
 ```bash

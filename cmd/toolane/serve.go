@@ -73,13 +73,15 @@ type transitionLog struct {
 	errorCode     string
 }
 
+const maxServerConfigBytes = 2 * 1024 * 1024
+
 func loadServerConfig(path string) (serverConfig, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return serverConfig{}, err
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Size() > 64*1024 {
-		return serverConfig{}, errors.New("server config must be a private regular file of at most 64 KiB")
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Size() > maxServerConfigBytes {
+		return serverConfig{}, errors.New("server config must be a private regular file of at most 2 MiB")
 	}
 	file, err := os.Open(path)
 	if err != nil {
@@ -93,12 +95,12 @@ func loadServerConfig(path string) (serverConfig, error) {
 	if !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() || openedInfo.Mode().Perm()&0077 != 0 {
 		return serverConfig{}, errors.New("server config changed while opening")
 	}
-	raw, err := io.ReadAll(io.LimitReader(file, 64*1024+1))
+	raw, err := io.ReadAll(io.LimitReader(file, maxServerConfigBytes+1))
 	if err != nil {
 		return serverConfig{}, err
 	}
-	if len(raw) > 64*1024 {
-		return serverConfig{}, errors.New("server config exceeds 64 KiB")
+	if len(raw) > maxServerConfigBytes {
+		return serverConfig{}, errors.New("server config exceeds 2 MiB")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()

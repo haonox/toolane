@@ -1,0 +1,8 @@
+{
+  "scenarios": [
+    {"tool": "bench.text", "weight": 40, "arguments": {"text": "Customer asks for a delivery update on order 90210."}},
+    {"tool": "bench.hash", "weight": 20, "arguments": {"text": "invoice:customer-731:2026-10", "rounds": 6000}},
+    {"tool": "bench.lookup", "weight": 30, "arguments": {"customer_id": "customer-731", "delay_ms": 20}},
+    {"tool": "bench.report", "weight": 10, "arguments": {"account_id": "account-2048", "items": 64}}
+  ]
+}

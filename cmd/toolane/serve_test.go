@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -51,6 +52,35 @@ func TestLoadServerConfigRequiresPrivateLoopbackConfiguration(t *testing.T) {
 	}
 	if _, err := loadServerConfig(path); err == nil {
 		t.Fatal("accepted world-readable token configuration")
+	}
+}
+
+func TestLoadServerConfigSupportsManyTenantsWithinSizeLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "server.json")
+	tokens := make([]httpapi.Token, 1000)
+	for i := range tokens {
+		tokens[i] = httpapi.Token{Value: "private-token-for-tenant-" + strconv.Itoa(i),
+			TenantID: "tenant-" + strconv.Itoa(i), Tools: []string{"mock.delay"}}
+	}
+	raw, err := json.Marshal(serverConfig{Tokens: tokens})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) <= 64*1024 || len(raw) >= maxServerConfigBytes {
+		t.Fatalf("test config size %d does not exercise expanded limit", len(raw))
+	}
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := loadServerConfig(path)
+	if err != nil || len(config.Tokens) != len(tokens) {
+		t.Fatalf("load 1000 tenants: count=%d err=%v", len(config.Tokens), err)
+	}
+	if err := os.WriteFile(path, bytes.Repeat([]byte(" "), maxServerConfigBytes+1), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadServerConfig(path); err == nil {
+		t.Fatal("accepted config over 2 MiB")
 	}
 }
 

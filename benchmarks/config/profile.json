@@ -1,0 +1,83 @@
+{
+  "business_listen": "127.0.0.1:18080",
+  "metrics_listen": "127.0.0.1:19090",
+  "tenant_count": 1000,
+  "execution": {
+    "workers": 48,
+    "queue_capacity": 4096,
+    "tenant_running_limit": 12,
+    "tenant_pending_limit": 512,
+    "retained_results": 50000
+  },
+  "process_tools": [
+    {
+      "name": "bench.text",
+      "description": "Normalize and summarize a short customer message.",
+      "script": "tools/text.py",
+      "parameters": {
+        "type": "object",
+        "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 2000}},
+        "required": ["text"],
+        "additionalProperties": false
+      },
+      "args": [{"parameter": "text"}, {"execution_id": true}],
+      "run_timeout_ms": 5000,
+      "max_output_bytes": 8192,
+      "max_result_bytes": 8192
+    },
+    {
+      "name": "bench.hash",
+      "description": "Compute repeated SHA-256 hashes as a CPU-heavy document fingerprint.",
+      "script": "tools/hash.py",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {"type": "string", "minLength": 1, "maxLength": 2000},
+          "rounds": {"type": "integer", "minimum": 1, "maximum": 20000}
+        },
+        "required": ["text", "rounds"],
+        "additionalProperties": false
+      },
+      "args": [{"parameter": "text"}, {"parameter": "rounds"}, {"execution_id": true}],
+      "run_timeout_ms": 10000,
+      "max_output_bytes": 8192,
+      "max_result_bytes": 8192
+    },
+    {
+      "name": "bench.lookup",
+      "description": "Simulate an external customer lookup with bounded I/O latency.",
+      "script": "tools/lookup.py",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "customer_id": {"type": "string", "minLength": 1, "maxLength": 64},
+          "delay_ms": {"type": "integer", "minimum": 1, "maximum": 1000}
+        },
+        "required": ["customer_id", "delay_ms"],
+        "additionalProperties": false
+      },
+      "args": [{"parameter": "customer_id"}, {"parameter": "delay_ms"}, {"execution_id": true}],
+      "run_timeout_ms": 5000,
+      "max_output_bytes": 8192,
+      "max_result_bytes": 8192
+    },
+    {
+      "name": "bench.report",
+      "description": "Produce a larger structured business report to stress result transfer.",
+      "script": "tools/report.py",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "account_id": {"type": "string", "minLength": 1, "maxLength": 64},
+          "items": {"type": "integer", "minimum": 1, "maximum": 128}
+        },
+        "required": ["account_id", "items"],
+        "additionalProperties": false
+      },
+      "args": [{"parameter": "account_id"}, {"parameter": "items"}, {"execution_id": true}],
+      "run_timeout_ms": 5000,
+      "max_output_bytes": 65536,
+      "max_result_bytes": 65536
+    }
+  ]
+}
