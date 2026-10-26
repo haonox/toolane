@@ -26,8 +26,8 @@ func startedExecution(t *testing.T, started <-chan int, want int) {
 	}
 }
 
-// ACC-01: a claimed execution occupies one worker; ready work stays FIFO.
-func TestV01WorkerLimitAndFIFO(t *testing.T) {
+// ACC-01: a claimed execution occupies one worker; same-tenant work starts in submission order.
+func TestV01WorkerLimitAndQueueOrder(t *testing.T) {
 	config := DefaultConfig()
 	config.Workers = 2
 	config.QueueCapacity = 2

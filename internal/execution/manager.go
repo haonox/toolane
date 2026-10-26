@@ -40,15 +40,6 @@ var (
 // State describes the public execution lifecycle.
 type State string
 
-// SchedulerMode selects how ready tasks are claimed. RoundRobin is the V0.2
-// default; FIFO remains available for controlled comparisons.
-type SchedulerMode string
-
-const (
-	SchedulerRoundRobin SchedulerMode = "round_robin"
-	SchedulerFIFO       SchedulerMode = "fifo"
-)
-
 const (
 	Queued     State = "queued"
 	Running    State = "running"
@@ -67,7 +58,6 @@ type Config struct {
 	TenantRunningLimit   int
 	TenantPendingLimit   int
 	MaxTenantIDBytes     int
-	Scheduler            SchedulerMode
 	RetainedResults      int
 	DefaultQueueTimeout  time.Duration
 	MaxQueueTimeout      time.Duration
@@ -88,7 +78,6 @@ func DefaultConfig() Config {
 		TenantRunningLimit:   2,
 		TenantPendingLimit:   64,
 		MaxTenantIDBytes:     256,
-		Scheduler:            SchedulerRoundRobin,
 		RetainedResults:      1000,
 		DefaultQueueTimeout:  30 * time.Second,
 		MaxQueueTimeout:      300 * time.Second,
@@ -108,9 +97,6 @@ func (c Config) validate() error {
 	}
 	if c.MaxTenantIDBytes < len("local") {
 		return errors.New("tenant ID byte limit must allow the local tenant")
-	}
-	if c.Scheduler != SchedulerRoundRobin && c.Scheduler != SchedulerFIFO {
-		return errors.New("invalid scheduler mode")
 	}
 	if c.DefaultQueueTimeout <= 0 || c.MaxQueueTimeout < c.DefaultQueueTimeout ||
 		c.DefaultRunTimeout <= 0 || c.MaxRunTimeout < c.DefaultRunTimeout {

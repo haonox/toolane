@@ -16,8 +16,6 @@ func tenantRequest(tenant, value string) Request {
 	return Request{TenantID: tenant, Tool: "scheduler.test", Arguments: json.RawMessage(fmt.Sprintf("%q", value))}
 }
 
-// ACC-10: with the same accepted backlog, round robin gives B a claim before
-// A's second task; FIFO retains the original ready order.
 func schedulerManager(t *testing.T, config Config, execute func(context.Context, string) error) *Manager {
 	t.Helper()
 	registry := tool.NewRegistry()
@@ -37,69 +35,60 @@ func schedulerManager(t *testing.T, config Config, execute func(context.Context,
 	return newTestManagerWithRegistry(t, config, registry)
 }
 
-func TestTenantRoundRobinAndFIFOOrder(t *testing.T) {
-	for _, tc := range []struct {
-		mode SchedulerMode
-		want []string
-	}{
-		{SchedulerRoundRobin, []string{"A1", "B1", "A2", "B2", "A3"}},
-		{SchedulerFIFO, []string{"A1", "A2", "A3", "B1", "B2"}},
-	} {
-		t.Run(string(tc.mode), func(t *testing.T) {
-			config := DefaultConfig()
-			config.Workers = 1
-			config.Scheduler = tc.mode
-			started := make(chan string, 6)
-			release := make(chan struct{})
-			m := schedulerManager(t, config, func(ctx context.Context, value string) error {
-				started <- value
-				if value == "anchor" {
-					select {
-					case <-release:
-					case <-ctx.Done():
-						return ctx.Err()
-					}
-				}
-				return nil
-			})
-			t.Cleanup(func() {
-				select {
-				case <-release:
-				default:
-					close(release)
-				}
-			})
-			anchor := submit(t, m, tenantRequest("anchor", "anchor"))
-			if got := <-started; got != "anchor" {
-				t.Fatalf("first start = %q", got)
+// With the same accepted backlog, round robin gives B a claim before A's second task.
+func TestTenantRoundRobinOrder(t *testing.T) {
+	config := DefaultConfig()
+	config.Workers = 1
+	started := make(chan string, 6)
+	release := make(chan struct{})
+	m := schedulerManager(t, config, func(ctx context.Context, value string) error {
+		started <- value
+		if value == "anchor" {
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return ctx.Err()
 			}
-			var tasks []Snapshot
-			for _, pair := range []struct{ tenant, value string }{
-				{"A", "A1"}, {"A", "A2"}, {"A", "A3"}, {"B", "B1"}, {"B", "B2"},
-			} {
-				tasks = append(tasks, submit(t, m, tenantRequest(pair.tenant, pair.value)))
-			}
+		}
+		return nil
+	})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
 			close(release)
-			var order []string
-			for range tasks {
-				select {
-				case value := <-started:
-					order = append(order, value)
-				case <-time.After(time.Second):
-					t.Fatal("task did not start")
-				}
-			}
-			if !reflect.DeepEqual(order, tc.want) {
-				t.Fatalf("claim order = %v, want %v", order, tc.want)
-			}
-			awaitState(t, m, anchor.ID, Succeeded)
-			for _, task := range tasks {
-				awaitState(t, m, task.ID, Succeeded)
-			}
-			if stats := m.Stats(); stats.Tenants != 0 || stats.Pending != 0 || stats.Running != 0 {
-				t.Fatalf("tenant state not released: %+v", stats)
-			}
-		})
+		}
+	})
+	anchor := submit(t, m, tenantRequest("anchor", "anchor"))
+	if got := <-started; got != "anchor" {
+		t.Fatalf("first start = %q", got)
+	}
+	var tasks []Snapshot
+	for _, pair := range []struct{ tenant, value string }{
+		{"A", "A1"}, {"A", "A2"}, {"A", "A3"}, {"B", "B1"}, {"B", "B2"},
+	} {
+		tasks = append(tasks, submit(t, m, tenantRequest(pair.tenant, pair.value)))
+	}
+	close(release)
+	var order []string
+	for range tasks {
+		select {
+		case value := <-started:
+			order = append(order, value)
+		case <-time.After(time.Second):
+			t.Fatal("task did not start")
+		}
+	}
+	want := []string{"A1", "B1", "A2", "B2", "A3"}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("claim order = %v, want %v", order, want)
+	}
+	awaitState(t, m, anchor.ID, Succeeded)
+	for _, task := range tasks {
+		awaitState(t, m, task.ID, Succeeded)
+	}
+	if stats := m.Stats(); stats.Tenants != 0 || stats.Pending != 0 || stats.Running != 0 {
+		t.Fatalf("tenant state not released: %+v", stats)
 	}
 }
 
@@ -321,7 +310,7 @@ func TestTenantContinuousSubmissionDoesNotStarveOtherTenant(t *testing.T) {
 	t.Logf("ACC-10: A accepted=%d after initial %d, rejected=%d; B claimed after %d A tasks", accepted.Load(), config.TenantPendingLimit, rejected.Load(), aBeforeB)
 }
 
-func TestTenantIdentityAndSchedulerConfiguration(t *testing.T) {
+func TestTenantIdentity(t *testing.T) {
 	config := DefaultConfig()
 	config.MaxTenantIDBytes = 5
 	m := schedulerManager(t, config, func(context.Context, string) error { return nil })
@@ -333,10 +322,6 @@ func TestTenantIdentityAndSchedulerConfiguration(t *testing.T) {
 		t.Fatalf("empty tenant should default to local: %+v", local)
 	}
 	awaitState(t, m, local.ID, Succeeded)
-	config.Scheduler = "unexpected"
-	if err := config.validate(); err == nil {
-		t.Fatal("invalid scheduler accepted")
-	}
 }
 
 func TestTenantStateDoesNotGrowAcrossCompletedIDs(t *testing.T) {

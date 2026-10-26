@@ -67,8 +67,6 @@ flowchart TD
 - Mock 工具用于学习和测试；Process 工具只运行服务端注册的可信程序。
 - Bearer Token 绑定租户和工具权限；业务与指标服务分别监听本机回环地址上的两个端口。
 
-[架构与执行语义](docs/architecture.md)
-
 [独立 HTTP 压测目录与加压方案](benchmarks/README.md)
 
 ## 快速开始
@@ -122,31 +120,9 @@ curl -sS http://127.0.0.1:8080/api/v1/executions \
   -d '{"tool":"mock.delay","arguments":{"delay_ms":100,"value":"hello"}}'
 ```
 
-响应包含 `execution_id`，可用 `GET /api/v1/executions/{id}` 查询。下方的 [`agent_bridge.py`](examples/agent_bridge.py) 会自动完成提交和轮询。
+响应包含 `execution_id`，可用 `GET /api/v1/executions/{id}` 查询。
 
 任务记录只在本次服务运行期间可查询。重新启动服务后，原执行 ID 不再可查询；重发请求会创建新任务。
-
-### 三文件端到端示例
-
-- [`examples/server.json`](examples/server.json) 配置服务容量、两个演示租户及 `text.stats` Process 工具。
-- [`examples/tools/text_stats.py`](examples/tools/text_stats.py) 是被 Toolane 启动的工具程序，返回字符数、单词数和 SHA-256。
-- [`examples/agent_bridge.py`](examples/agent_bridge.py) 从 Toolane 获取公开工具定义，模拟一次模型 Function Calling，提交任务并轮询结果，最后打印带原始 `call_id` 的 `function_call_output`。它不会调用真实大模型。
-
-`server.json` 中的 Python 路径和项目目录是当前工作区的绝对路径；复制仓库到别处时，先修改 `executable`、`directory` 和 `args[0].literal`。演示 Token 已写在文件中，只适合本机练习。第一个终端启动服务：
-
-```bash
-chmod 600 examples/server.json
-go run ./cmd/toolane serve --config examples/server.json
-```
-
-第二个终端模拟一次完整的工具调用：
-
-```bash
-export TOOLANE_TOKEN='local-demo-tenant-a-token-20261023'
-python3 examples/agent_bridge.py --text 'hello Toolane'
-```
-
-终端依次显示工具定义、模拟的模型调用、Toolane 接收的 `execution_id`、最终状态与结果，以及准备回传给模型的 `function_call_output`。其中 `call_id` 属于模型调用，`execution_id` 属于 Toolane 任务。
 
 管理员在 `process_tools` 中固定可执行文件、工作目录、环境变量、JSON Schema 和参数位置。参数位置只能使用固定值、必填字段或执行 ID；Toolane 直接构造参数数组，不经过 Shell。Process 工具成功退出时，标准输出必须是一个 JSON 值，它会成为任务结果。只应注册可信程序。
 
@@ -174,7 +150,6 @@ python3 examples/agent_bridge.py --text 'hello Toolane'
 | `internal/executor/` | Mock 与可信 Process 执行 |
 | `internal/httpapi/` | Token 授权与 HTTP 接口 |
 | `internal/observability/` | 日志和指标 |
-| `examples/` | 三文件端到端 Function Calling 示例 |
 
 ```bash
 go test ./...

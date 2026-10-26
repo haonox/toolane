@@ -67,18 +67,9 @@ func (m *Manager) pruneTenantLocked(state *tenantState) {
 	}
 }
 
-// takeReadyLocked returns the oldest eligible task under FIFO or the oldest
-// task for the next eligible tenant under round robin. It leaves blocked nodes,
-// tenants at their running limit untouched.
+// takeReadyLocked returns the oldest task for the next eligible tenant.
+// Tenants at their running limit remain queued until a slot is released.
 func (m *Manager) takeReadyLocked() *record {
-	if m.config.Scheduler == SchedulerFIFO {
-		for i, r := range m.queue {
-			if m.canClaimLocked(r) {
-				return m.takeQueuedAtLocked(i)
-			}
-		}
-		return nil
-	}
 	for offset := 0; offset < len(m.tenantOrder); offset++ {
 		index := (m.rrCursor + offset) % len(m.tenantOrder)
 		state := m.tenants[m.tenantOrder[index]]
