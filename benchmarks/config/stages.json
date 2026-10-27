@@ -4,10 +4,13 @@
     {"name": "ramp-128", "concurrency": 128, "requests": 4000},
     {"name": "tenant-volume-100k", "concurrency": 512, "requests": 100000},
     {"name": "ramp-256", "concurrency": 256, "requests": 6000},
+    {"name": "baseline-fixed", "concurrency": 512, "requests": 8000, "workload": "baseline"},
     {"name": "ramp-512", "concurrency": 512, "requests": 8000},
+    {"name": "tenant-skew-80-10", "concurrency": 512, "requests": 12000, "hot_tenant_percent": 10, "hot_call_percent": 80},
     {"name": "ramp-1024", "concurrency": 1024, "requests": 10000},
     {"name": "ramp-2048", "concurrency": 2048, "requests": 12000},
     {"name": "ramp-4096", "concurrency": 4096, "requests": 12000},
-    {"name": "overload-6144", "concurrency": 6144, "requests": 12000}
+    {"name": "overload-6144", "concurrency": 6144, "requests": 12000},
+    {"name": "open-arrival-150pct", "concurrency": 4096, "requests": 12000, "arrival_reference": "ramp-512", "arrival_multiplier": 1.5}
   ]
 }

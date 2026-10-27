@@ -34,6 +34,7 @@ type tokenFile struct {
 }
 
 type scenario struct {
+	Name      string          `json:"name"`
 	Tool      string          `json:"tool"`
 	Weight    int             `json:"weight"`
 	Arguments json.RawMessage `json:"arguments"`
@@ -54,17 +55,21 @@ type execution struct {
 }
 
 type sample struct {
-	Tenant    string
-	Tool      string
-	Admission int
-	Status    string
-	Error     string
-	Submit    time.Duration
-	EndToEnd  time.Duration
-	Queue     time.Duration
-	Execution time.Duration
-	Polls     int
-	HasResult bool
+	Tenant      string
+	TenantGroup string
+	Scenario    string
+	Tool        string
+	Dropped     bool
+	ArrivalLag  time.Duration
+	Admission   int
+	Status      string
+	Error       string
+	Submit      time.Duration
+	EndToEnd    time.Duration
+	Queue       time.Duration
+	Execution   time.Duration
+	Polls       int
+	HasResult   bool
 }
 
 type percentile struct {
@@ -74,33 +79,54 @@ type percentile struct {
 }
 
 type tenantCounts struct {
-	Submitted int `json:"submitted"`
-	Accepted  int `json:"accepted"`
-	Succeeded int `json:"succeeded"`
-	Rejected  int `json:"rejected"`
-	Failed    int `json:"failed"`
+	Submitted     int `json:"submitted"`
+	Accepted      int `json:"accepted"`
+	Succeeded     int `json:"succeeded"`
+	Rejected      int `json:"rejected"`
+	Failed        int `json:"failed"`
+	ClientDropped int `json:"client_dropped"`
+}
+
+type breakdownSummary struct {
+	Counts          tenantCounts `json:"counts"`
+	EndToEndLatency percentile   `json:"end_to_end_latency"`
+	QueueLatency    percentile   `json:"queue_latency"`
+	ExecutionTime   percentile   `json:"execution_time"`
+}
+
+type scenarioTimings struct {
+	endToEnd  []time.Duration
+	queue     []time.Duration
+	execution []time.Duration
 }
 
 type summary struct {
-	StartedAt       time.Time               `json:"started_at"`
-	DurationSeconds float64                 `json:"duration_seconds"`
-	BaseURL         string                  `json:"base_url"`
-	Tool            string                  `json:"tool"`
-	Requests        int                     `json:"requests"`
-	Concurrency     int                     `json:"concurrency"`
-	AttemptedPerSec float64                 `json:"attempted_per_second"`
-	SucceededPerSec float64                 `json:"succeeded_per_second"`
-	Admission       map[string]int          `json:"admission_http_status"`
-	FinalStatus     map[string]int          `json:"final_status"`
-	ResultsPresent  int                     `json:"results_present"`
-	Errors          map[string]int          `json:"errors"`
-	PerTenant       map[string]tenantCounts `json:"per_tenant"`
-	PerTool         map[string]tenantCounts `json:"per_tool"`
-	SubmitLatency   percentile              `json:"submit_latency"`
-	EndToEndLatency percentile              `json:"end_to_end_latency"`
-	QueueLatency    percentile              `json:"queue_latency"`
-	ExecutionTime   percentile              `json:"execution_time"`
-	TotalPolls      int                     `json:"total_polls"`
+	StartedAt       time.Time                   `json:"started_at"`
+	DurationSeconds float64                     `json:"duration_seconds"`
+	BaseURL         string                      `json:"base_url"`
+	Tool            string                      `json:"tool"`
+	Requests        int                         `json:"requests"`
+	Concurrency     int                         `json:"concurrency"`
+	ArrivalRate     float64                     `json:"arrival_rate_per_second"`
+	HotTenantPct    int                         `json:"hot_tenant_percent"`
+	HotCallPct      int                         `json:"hot_call_percent"`
+	ClientDropped   int                         `json:"client_capacity_drops"`
+	AttemptedPerSec float64                     `json:"attempted_per_second"`
+	SucceededPerSec float64                     `json:"succeeded_per_second"`
+	Admission       map[string]int              `json:"admission_http_status"`
+	FinalStatus     map[string]int              `json:"final_status"`
+	ResultsPresent  int                         `json:"results_present"`
+	Errors          map[string]int              `json:"errors"`
+	PerTenant       map[string]tenantCounts     `json:"per_tenant"`
+	PerTenantGroup  map[string]breakdownSummary `json:"per_tenant_group"`
+	PerTool         map[string]tenantCounts     `json:"per_tool"`
+	PerScenario     map[string]breakdownSummary `json:"per_scenario"`
+	SubmitLatency   percentile                  `json:"submit_latency"`
+	EndToEndLatency percentile                  `json:"end_to_end_latency"`
+	QueueLatency    percentile                  `json:"queue_latency"`
+	ExecutionTime   percentile                  `json:"execution_time"`
+	ArrivalLag      percentile                  `json:"arrival_lag"`
+	TotalPolls      int                         `json:"total_polls"`
 }
 
 type options struct {
@@ -112,19 +138,23 @@ type options struct {
 
 func main() {
 	var baseURL, tokensPath, workloadPath, outputPath string
-	var requests, concurrency int
+	var requests, concurrency, hotTenantPct, hotCallPct int
+	var arrivalRate float64
 	var pollInterval, waitTimeout, httpTimeout time.Duration
 	flag.StringVar(&baseURL, "base-url", "http://127.0.0.1:8080", "Toolane business HTTP origin")
 	flag.StringVar(&tokensPath, "tokens-file", "benchmarks/generated/server.json", "private JSON file with a tokens array")
 	flag.StringVar(&workloadPath, "workload-file", "benchmarks/config/workload.json", "weighted tool-call workload JSON")
 	flag.IntVar(&requests, "requests", 100, "number of complete tool calls")
 	flag.IntVar(&concurrency, "concurrency", 16, "maximum concurrent end-to-end tool calls")
+	flag.IntVar(&hotTenantPct, "hot-tenant-percent", 0, "percentage of tenants in the hot group; 0 uses uniform tenant rotation")
+	flag.IntVar(&hotCallPct, "hot-call-percent", 0, "percentage of calls assigned to the hot tenant group")
+	flag.Float64Var(&arrivalRate, "arrival-rate", 0, "scheduled calls per second; 0 uses closed-loop concurrency")
 	flag.DurationVar(&pollInterval, "poll-interval", 50*time.Millisecond, "delay between result polls")
 	flag.DurationVar(&waitTimeout, "wait-timeout", 30*time.Second, "maximum wait for each accepted execution")
 	flag.DurationVar(&httpTimeout, "http-timeout", 10*time.Second, "timeout for one HTTP request")
 	flag.StringVar(&outputPath, "output", "", "optional new JSON summary file")
 	flag.Parse()
-	if err := validate(baseURL, tokensPath, workloadPath, requests, concurrency, pollInterval, waitTimeout, httpTimeout); err != nil {
+	if err := validate(baseURL, tokensPath, workloadPath, requests, concurrency, hotTenantPct, hotCallPct, arrivalRate, pollInterval, waitTimeout, httpTimeout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
@@ -136,6 +166,10 @@ func main() {
 	tenants, err := readTokens(tokensPath, work)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if hotTenantPct > 0 && len(tenants) < 2 {
+		fmt.Fprintln(os.Stderr, "hot tenant selection requires at least two tenants")
 		os.Exit(2)
 	}
 	transport := &http.Transport{Proxy: nil, MaxIdleConns: concurrency * 2,
@@ -152,47 +186,44 @@ func main() {
 		os.Exit(1)
 	}
 	started := time.Now()
-	jobs := make(chan int)
-	results := make(chan sample, concurrency)
-	var clientLoops sync.WaitGroup
-	for range concurrency {
-		clientLoops.Add(1)
-		go func() {
-			defer clientLoops.Done()
-			for index := range jobs {
-				results <- run(ctx, opt, tenants[index%len(tenants)], work.pick(index))
-			}
-		}()
-	}
-	go func() {
-		defer close(jobs)
-		for index := range requests {
-			select {
-			case jobs <- index:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-	go func() {
-		clientLoops.Wait()
-		close(results)
-	}()
+	results := startLoad(ctx, opt, tenants, work, requests, concurrency, hotTenantPct, hotCallPct, arrivalRate, started)
 	stats := newSummary(started, opt.baseURL, "weighted_mix", requests, concurrency)
-	var submitTimes, endToEndTimes, queueTimes, executionTimes []time.Duration
+	stats.ArrivalRate, stats.HotTenantPct, stats.HotCallPct = arrivalRate, hotTenantPct, hotCallPct
+	var submitTimes, endToEndTimes, queueTimes, executionTimes, arrivalLags []time.Duration
+	scenarioTimes := make(map[string]*scenarioTimings)
+	groupTimes := make(map[string]*scenarioTimings)
 	for result := range results {
 		stats.add(result)
+		timings := scenarioTimes[result.Scenario]
+		if timings == nil {
+			timings = &scenarioTimings{}
+			scenarioTimes[result.Scenario] = timings
+		}
+		groupTiming := groupTimes[result.TenantGroup]
+		if groupTiming == nil {
+			groupTiming = &scenarioTimings{}
+			groupTimes[result.TenantGroup] = groupTiming
+		}
 		if result.Submit > 0 {
 			submitTimes = append(submitTimes, result.Submit)
 		}
 		if result.EndToEnd > 0 {
 			endToEndTimes = append(endToEndTimes, result.EndToEnd)
+			timings.endToEnd = append(timings.endToEnd, result.EndToEnd)
+			groupTiming.endToEnd = append(groupTiming.endToEnd, result.EndToEnd)
 		}
 		if result.Queue > 0 {
 			queueTimes = append(queueTimes, result.Queue)
+			timings.queue = append(timings.queue, result.Queue)
+			groupTiming.queue = append(groupTiming.queue, result.Queue)
 		}
 		if result.Execution > 0 {
 			executionTimes = append(executionTimes, result.Execution)
+			timings.execution = append(timings.execution, result.Execution)
+			groupTiming.execution = append(groupTiming.execution, result.Execution)
+		}
+		if arrivalRate > 0 {
+			arrivalLags = append(arrivalLags, result.ArrivalLag)
 		}
 	}
 	stats.DurationSeconds = time.Since(started).Seconds()
@@ -204,6 +235,21 @@ func main() {
 	stats.EndToEndLatency = percentiles(endToEndTimes)
 	stats.QueueLatency = percentiles(queueTimes)
 	stats.ExecutionTime = percentiles(executionTimes)
+	stats.ArrivalLag = percentiles(arrivalLags)
+	for name, timings := range scenarioTimes {
+		item := stats.PerScenario[name]
+		item.EndToEndLatency = percentiles(timings.endToEnd)
+		item.QueueLatency = percentiles(timings.queue)
+		item.ExecutionTime = percentiles(timings.execution)
+		stats.PerScenario[name] = item
+	}
+	for name, timings := range groupTimes {
+		item := stats.PerTenantGroup[name]
+		item.EndToEndLatency = percentiles(timings.endToEnd)
+		item.QueueLatency = percentiles(timings.queue)
+		item.ExecutionTime = percentiles(timings.execution)
+		stats.PerTenantGroup[name] = item
+	}
 	encoded, err := json.MarshalIndent(stats, "", "  ")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -218,7 +264,105 @@ func main() {
 	}
 }
 
-func validate(baseURL, tokensPath, workloadPath string, requests, concurrency int, pollInterval, waitTimeout, httpTimeout time.Duration) error {
+func startLoad(ctx context.Context, opt options, tenants []tenant, work workload, requests, concurrency, hotTenantPct, hotCallPct int, arrivalRate float64, started time.Time) <-chan sample {
+	results := make(chan sample, concurrency)
+	if arrivalRate == 0 {
+		jobs := make(chan int)
+		var clients sync.WaitGroup
+		for range concurrency {
+			clients.Add(1)
+			go func() {
+				defer clients.Done()
+				for index := range jobs {
+					selectedTenant, group := pickTenant(index, tenants, hotTenantPct, hotCallPct)
+					result := run(ctx, opt, selectedTenant, work.pick(index))
+					result.TenantGroup = group
+					results <- result
+				}
+			}()
+		}
+		go func() {
+			defer close(jobs)
+			for index := range requests {
+				select {
+				case jobs <- index:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+		go func() {
+			clients.Wait()
+			close(results)
+		}()
+		return results
+	}
+	go func() {
+		var clients sync.WaitGroup
+		defer func() {
+			clients.Wait()
+			close(results)
+		}()
+		slots := make(chan struct{}, concurrency)
+		for index := range requests {
+			planned := started.Add(time.Duration(float64(index) / arrivalRate * float64(time.Second)))
+			if wait := time.Until(planned); wait > 0 {
+				timer := time.NewTimer(wait)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				}
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			lag := max(time.Duration(0), time.Since(planned))
+			selectedTenant, group := pickTenant(index, tenants, hotTenantPct, hotCallPct)
+			selectedScenario := work.pick(index)
+			select {
+			case slots <- struct{}{}:
+				clients.Add(1)
+				go func() {
+					defer clients.Done()
+					defer func() { <-slots }()
+					result := run(ctx, opt, selectedTenant, selectedScenario)
+					result.TenantGroup = group
+					result.ArrivalLag = lag
+					results <- result
+				}()
+			default:
+				results <- sample{Tenant: selectedTenant.ID, TenantGroup: group, Scenario: selectedScenario.Name, Tool: selectedScenario.Tool,
+					Dropped: true, ArrivalLag: lag, Error: "client_capacity"}
+			}
+		}
+	}()
+	return results
+}
+
+func spread(index int) uint64 {
+	x := uint64(index) + 0x9e3779b97f4a7c15
+	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
+	x = (x ^ (x >> 27)) * 0x94d049bb133111eb
+	return x ^ (x >> 31)
+}
+
+func pickTenant(index int, tenants []tenant, hotTenantPct, hotCallPct int) (tenant, string) {
+	if hotTenantPct == 0 {
+		return tenants[index%len(tenants)], "uniform"
+	}
+	hotCount := min(len(tenants)-1, max(1, (len(tenants)*hotTenantPct+99)/100))
+	choice := spread(index)
+	if int(choice%100) < hotCallPct {
+		position := int(spread(index+0x5f3759df) % uint64(hotCount))
+		return tenants[position], "hot"
+	}
+	position := int(spread(index+0x5f3759df) % uint64(len(tenants)-hotCount))
+	return tenants[hotCount+position], "cold"
+}
+
+func validate(baseURL, tokensPath, workloadPath string, requests, concurrency, hotTenantPct, hotCallPct int, arrivalRate float64, pollInterval, waitTimeout, httpTimeout time.Duration) error {
 	parsed, err := url.Parse(baseURL)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" ||
 		parsed.User != nil || parsed.Path != "" && parsed.Path != "/" || parsed.RawQuery != "" || parsed.Fragment != "" {
@@ -226,6 +370,14 @@ func validate(baseURL, tokensPath, workloadPath string, requests, concurrency in
 	}
 	if tokensPath == "" || workloadPath == "" || requests <= 0 || concurrency <= 0 || pollInterval <= 0 || waitTimeout <= 0 || httpTimeout <= 0 {
 		return errors.New("tokens-file and workload-file are required; counts and durations must be positive")
+	}
+	if hotTenantPct != 0 || hotCallPct != 0 {
+		if hotTenantPct < 1 || hotTenantPct > 99 || hotCallPct < 1 || hotCallPct > 99 {
+			return errors.New("hot tenant and hot call percentages must both be in 1..99")
+		}
+	}
+	if math.IsNaN(arrivalRate) || math.IsInf(arrivalRate, 0) || arrivalRate < 0 || arrivalRate > 1_000_000 {
+		return errors.New("arrival rate must be in 0..1000000 calls per second")
 	}
 	return nil
 }
@@ -245,11 +397,13 @@ func readWorkload(path string) (workload, error) {
 		return workload{}, errors.New("workload needs 1..100 scenarios")
 	}
 	total := 0
+	names := make(map[string]bool, len(work.Scenarios))
 	for _, s := range work.Scenarios {
 		var args map[string]json.RawMessage
-		if s.Tool == "" || s.Weight <= 0 || s.Weight > 10000 || json.Unmarshal(s.Arguments, &args) != nil || args == nil {
-			return workload{}, errors.New("each scenario needs tool, positive weight and JSON object arguments")
+		if strings.TrimSpace(s.Name) == "" || names[s.Name] || s.Tool == "" || s.Weight <= 0 || s.Weight > 10000 || json.Unmarshal(s.Arguments, &args) != nil || args == nil {
+			return workload{}, errors.New("each scenario needs a unique name, tool, positive weight and JSON object arguments")
 		}
+		names[s.Name] = true
 		total += s.Weight
 	}
 	if total > 10000 {
@@ -264,10 +418,7 @@ func (w workload) pick(index int) scenario {
 		total += s.Weight
 	}
 	// SplitMix64 gives a repeatable spread without tying tenant rotation to tool order.
-	x := uint64(index) + 0x9e3779b97f4a7c15
-	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
-	x = (x ^ (x >> 27)) * 0x94d049bb133111eb
-	target := int((x ^ (x >> 31)) % uint64(total))
+	target := int(spread(index) % uint64(total))
 	for _, s := range w.Scenarios {
 		if target < s.Weight {
 			return s
@@ -328,7 +479,7 @@ func checkReady(ctx context.Context, opt options) error {
 }
 
 func run(ctx context.Context, opt options, tenant tenant, scenario scenario) sample {
-	result := sample{Tenant: tenant.ID, Tool: scenario.Tool}
+	result := sample{Tenant: tenant.ID, Scenario: scenario.Name, Tool: scenario.Tool}
 	start := time.Now()
 	requestBody, _ := json.Marshal(struct {
 		Tool      string          `json:"tool"`
@@ -435,32 +586,62 @@ func call(ctx context.Context, client *http.Client, method, endpoint, token stri
 func newSummary(start time.Time, baseURL, toolName string, requests, concurrency int) summary {
 	return summary{StartedAt: start.UTC(), BaseURL: baseURL, Tool: toolName, Requests: requests,
 		Concurrency: concurrency, Admission: map[string]int{}, FinalStatus: map[string]int{},
-		Errors: map[string]int{}, PerTenant: map[string]tenantCounts{}, PerTool: map[string]tenantCounts{}}
+		Errors: map[string]int{}, PerTenant: map[string]tenantCounts{}, PerTool: map[string]tenantCounts{},
+		PerScenario: map[string]breakdownSummary{}, PerTenantGroup: map[string]breakdownSummary{}}
 }
 
 func (s *summary) add(result sample) {
 	counts := s.PerTenant[result.Tenant]
 	toolCounts := s.PerTool[result.Tool]
+	scenarioStats := s.PerScenario[result.Scenario]
+	scenarioCounts := scenarioStats.Counts
+	groupStats := s.PerTenantGroup[result.TenantGroup]
+	groupCounts := groupStats.Counts
+	if result.Dropped {
+		s.ClientDropped++
+		counts.ClientDropped++
+		toolCounts.ClientDropped++
+		scenarioCounts.ClientDropped++
+		groupCounts.ClientDropped++
+		s.Errors[result.Error]++
+		s.PerTenant[result.Tenant] = counts
+		s.PerTool[result.Tool] = toolCounts
+		scenarioStats.Counts = scenarioCounts
+		s.PerScenario[result.Scenario] = scenarioStats
+		groupStats.Counts = groupCounts
+		s.PerTenantGroup[result.TenantGroup] = groupStats
+		return
+	}
 	counts.Submitted++
 	toolCounts.Submitted++
+	scenarioCounts.Submitted++
+	groupCounts.Submitted++
 	if result.Admission > 0 {
 		s.Admission[fmt.Sprint(result.Admission)]++
 	}
 	if result.Admission == http.StatusAccepted {
 		counts.Accepted++
 		toolCounts.Accepted++
+		scenarioCounts.Accepted++
+		groupCounts.Accepted++
 	} else if result.Admission != 0 {
 		counts.Rejected++
 		toolCounts.Rejected++
+		scenarioCounts.Rejected++
+		groupCounts.Rejected++
 	}
 	if result.Status != "" {
 		s.FinalStatus[result.Status]++
 		if result.Status == "succeeded" {
 			counts.Succeeded++
 			toolCounts.Succeeded++
+			scenarioCounts.Succeeded++
+			groupCounts.Succeeded++
 		} else {
 			counts.Failed++
 			toolCounts.Failed++
+			scenarioCounts.Failed++
+			groupCounts.Failed++
 		}
 	}
 	if result.HasResult {
@@ -472,6 +653,10 @@ func (s *summary) add(result sample) {
 	s.TotalPolls += result.Polls
 	s.PerTenant[result.Tenant] = counts
 	s.PerTool[result.Tool] = toolCounts
+	scenarioStats.Counts = scenarioCounts
+	s.PerScenario[result.Scenario] = scenarioStats
+	groupStats.Counts = groupCounts
+	s.PerTenantGroup[result.TenantGroup] = groupStats
 }
 
 func (s summary) count() int {

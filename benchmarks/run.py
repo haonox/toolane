@@ -62,10 +62,22 @@ def main() -> int:
     build_env = dict(os.environ, GOCACHE=str(GENERATED / "go-cache"))
     subprocess.run(["go", "build", "-o", str(GENERATED / "toolane"), "./cmd/toolane"], cwd=REPO, env=build_env, check=True)
     subprocess.run(["go", "build", "-o", str(GENERATED / "load"), "./benchmarks/http"], cwd=REPO, env=build_env, check=True)
+    revision, dirty = None, None
+    if shutil.which("git"):
+        revision_result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True)
+        if revision_result.returncode == 0:
+            revision = revision_result.stdout.strip()
+            dirty_result = subprocess.run(["git", "status", "--porcelain"], cwd=REPO, capture_output=True, text=True)
+            if dirty_result.returncode == 0:
+                dirty = bool(dirty_result.stdout.strip())
     metadata = {"started_at": datetime.now(timezone.utc).isoformat(), "cpu_count": os.cpu_count(),
-                "profile": profile, "stages": stages, "python": sys.version.split()[0]}
+                "profile": profile, "stages": stages, "python": sys.version.split()[0],
+                "git_revision": revision, "git_dirty": dirty,
+                "workloads": {name: json.loads((HERE / "config" / filename).read_text(encoding="utf-8"))
+                              for name, filename in (("mixed", "workload.json"), ("baseline", "workload-baseline.json"))}}
     (run_dir / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     print(f"Results: {run_dir}", flush=True)
+    completed_rates = {}
     with (run_dir / "server.log").open("w", encoding="utf-8") as log:
         server = subprocess.Popen([str(GENERATED / "toolane"), "serve", "--config", str(SERVER)],
                                   cwd=REPO, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
@@ -80,19 +92,37 @@ def main() -> int:
                 raise RuntimeError(f"server did not become ready; see {run_dir / 'server.log'}")
             for stage in stages:
                 name = stage["name"]
+                workload_name = stage.get("workload", "mixed")
+                if workload_name not in ("mixed", "baseline"):
+                    raise ValueError(f"unknown workload for {name}: {workload_name}")
+                workload_path = HERE / "config" / ("workload-baseline.json" if workload_name == "baseline" else "workload.json")
+                arrival_rate = 0.0
+                if "arrival_reference" in stage:
+                    reference = stage["arrival_reference"]
+                    if reference not in completed_rates or stage.get("arrival_multiplier", 0) <= 0:
+                        raise ValueError(f"{name} needs an earlier successful arrival_reference and positive multiplier")
+                    arrival_rate = completed_rates[reference] * stage["arrival_multiplier"]
+                    if arrival_rate <= 0:
+                        raise ValueError(f"{name} has no positive reference completion rate")
                 output = run_dir / f"{name}.json"
                 metrics(metrics_url, run_dir / f"{name}-before.prom")
                 started = time.monotonic()
                 command = [str(GENERATED / "load"), "-base-url", base_url, "-tokens-file", str(SERVER),
-                           "-workload-file", str(HERE / "config" / "workload.json"),
+                           "-workload-file", str(workload_path),
                            "-requests", str(stage["requests"]), "-concurrency", str(stage["concurrency"]),
                            "-wait-timeout", "60s", "-output", str(output)]
+                if stage.get("hot_tenant_percent", 0) or stage.get("hot_call_percent", 0):
+                    command.extend(["-hot-tenant-percent", str(stage.get("hot_tenant_percent", 0)),
+                                    "-hot-call-percent", str(stage.get("hot_call_percent", 0))])
+                if arrival_rate > 0:
+                    command.extend(["-arrival-rate", str(arrival_rate)])
                 with (run_dir / f"{name}.stderr").open("w", encoding="utf-8") as errors:
                     result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=errors, cwd=REPO)
                 metrics(metrics_url, run_dir / f"{name}-after.prom")
                 if result.returncode != 0:
                     raise RuntimeError(f"stage {name} failed; see {run_dir / f'{name}.stderr'}")
                 summary = json.loads(output.read_text(encoding="utf-8"))
+                completed_rates[name] = summary["succeeded_per_second"]
                 per_tenant = summary["per_tenant"]
                 active_tenants = len(per_tenant)
                 min_calls = min(counts["submitted"] for counts in per_tenant.values())
@@ -104,10 +134,15 @@ def main() -> int:
                       f"success/tenant={min_success}..{max_success} "
                       f"accepted={summary['admission_http_status'].get('202', 0)} "
                       f"rejected429={summary['admission_http_status'].get('429', 0)} "
+                      f"client_dropped={summary['client_capacity_drops']} "
                       f"succeeded={summary['final_status'].get('succeeded', 0)} "
+                      f"arrival_rate={summary['arrival_rate_per_second']:.1f}/s "
                       f"rate={summary['succeeded_per_second']:.1f}/s "
                       f"p99={summary['end_to_end_latency']['p99_ms']:.1f}ms "
                       f"errors={sum(summary['errors'].values())} elapsed={time.monotonic()-started:.1f}s", flush=True)
+                if summary["client_capacity_drops"]:
+                    print("Client capacity was exhausted; increase concurrency or lower the arrival rate before interpreting this stage", file=sys.stderr)
+                    return 1
                 if any(key not in ("admission_http_429",) for key in summary["errors"]):
                     print("Stopped the matrix after unexpected errors; inspect the stage JSON", file=sys.stderr)
                     return 1

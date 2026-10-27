@@ -1,8 +1,16 @@
 {
   "scenarios": [
-    {"tool": "bench.text", "weight": 40, "arguments": {"text": "Customer asks for a delivery update on order 90210."}},
-    {"tool": "bench.hash", "weight": 20, "arguments": {"text": "invoice:customer-731:2026-10", "rounds": 6000}},
-    {"tool": "bench.lookup", "weight": 30, "arguments": {"customer_id": "customer-731", "delay_ms": 20}},
-    {"tool": "bench.report", "weight": 10, "arguments": {"account_id": "account-2048", "items": 64}}
+    {"name": "text-short", "tool": "bench.text", "weight": 25, "arguments": {"text": "Where is order 90210?"}},
+    {"name": "text-medium", "tool": "bench.text", "weight": 12, "arguments": {"text": "Customer asks for a delivery update on order 90210. The package was marked delayed yesterday, and the customer would like an estimated delivery date and the latest carrier status."}},
+    {"name": "text-long", "tool": "bench.text", "weight": 3, "arguments": {"text": "Customer support case for order 90210. The buyer has contacted support twice about a delayed package and needs a summary of the order status, the last carrier update, the promised delivery window, and the next action for the support team. The shipment contains several items from different warehouses. The buyer also asked whether a partial refund applies if the last item arrives after the promised date. Please keep the response concise while preserving each relevant detail."}},
+    {"name": "hash-light", "tool": "bench.hash", "weight": 12, "arguments": {"text": "invoice:customer-731:2026-10", "rounds": 1000}},
+    {"name": "hash-medium", "tool": "bench.hash", "weight": 6, "arguments": {"text": "invoice:customer-731:2026-10:reconciliation", "rounds": 6000}},
+    {"name": "hash-heavy", "tool": "bench.hash", "weight": 2, "arguments": {"text": "invoice:customer-731:2026-10:full-validation", "rounds": 16000}},
+    {"name": "lookup-fast", "tool": "bench.lookup", "weight": 18, "arguments": {"customer_id": "customer-731", "delay_ms": 10}},
+    {"name": "lookup-medium", "tool": "bench.lookup", "weight": 9, "arguments": {"customer_id": "customer-2048", "delay_ms": 80}},
+    {"name": "lookup-slow", "tool": "bench.lookup", "weight": 3, "arguments": {"customer_id": "customer-4096", "delay_ms": 300}},
+    {"name": "report-small", "tool": "bench.report", "weight": 6, "arguments": {"account_id": "account-2048", "items": 8}},
+    {"name": "report-medium", "tool": "bench.report", "weight": 3, "arguments": {"account_id": "account-731", "items": 64}},
+    {"name": "report-large", "tool": "bench.report", "weight": 1, "arguments": {"account_id": "account-4096", "items": 128}}
   ]
 }
