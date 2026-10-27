@@ -164,6 +164,59 @@ func TestTenantRunningLimitSkipsSaturatedTenant(t *testing.T) {
 	}
 }
 
+func TestQueuedDeadlineIndexExpiresTaskBehindTenantHead(t *testing.T) {
+	config := DefaultConfig()
+	config.Workers = 1
+	config.TenantRunningLimit = 1
+	started := make(chan string, 4)
+	release := make(chan struct{})
+	m := schedulerManager(t, config, func(ctx context.Context, value string) error {
+		started <- value
+		if value == "anchor" {
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return nil
+	})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	anchor := submit(t, m, tenantRequest("A", "anchor"))
+	if got := <-started; got != "anchor" {
+		t.Fatalf("first start = %q", got)
+	}
+	long := tenantRequest("A", "long")
+	long.QueueTimeout = time.Second
+	longTask := submit(t, m, long)
+	short := tenantRequest("A", "short")
+	short.QueueTimeout = 30 * time.Millisecond
+	shortTask := submit(t, m, short)
+	if got := awaitState(t, m, shortTask.ID, TimedOut); got.ErrorCode != "queue_timeout" {
+		t.Fatalf("short queued task = %+v", got)
+	}
+	if got, err := m.Get(longTask.ID); err != nil || got.State != Queued {
+		t.Fatalf("long queued task = %+v, %v", got, err)
+	}
+	close(release)
+	awaitState(t, m, anchor.ID, Succeeded)
+	awaitState(t, m, longTask.ID, Succeeded)
+	if got := <-started; got != "long" {
+		t.Fatalf("next start = %q", got)
+	}
+	select {
+	case got := <-started:
+		t.Fatalf("expired queued task started: %q", got)
+	default:
+	}
+}
+
 // ACC-10: a tenant that keeps submitting against a full queue cannot prevent
 // another ready tenant from being claimed, and its pending quota stays bounded.
 func TestTenantContinuousSubmissionDoesNotStarveOtherTenant(t *testing.T) {

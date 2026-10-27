@@ -2,6 +2,7 @@
 package execution
 
 import (
+	"container/list"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -158,6 +159,8 @@ type record struct {
 	deadline       time.Time
 	cancel         context.CancelFunc
 	tenant         *tenantState
+	queueElem      *list.Element
+	deadlineIndex  int
 	storeSequence  int64
 	storeVersion   int64
 	idempotencyKey string
@@ -189,9 +192,8 @@ type Manager struct {
 	store              *sqlite.Store
 	storageErr         error
 	tenants            map[string]*tenantState
-	tenantOrder        []string
-	rrCursor           int
-	queue              []*record
+	readyTenants       list.List
+	deadlines          deadlineHeap
 	terminal           []string
 	pending            int
 	running            int
@@ -371,7 +373,6 @@ func (m *Manager) Submit(ctx context.Context, req Request) (Snapshot, error) {
 		r.storeSequence, r.storeVersion = stored.Sequence, stored.Version
 	}
 	m.records[id] = r
-	m.queue = append(m.queue, r)
 	m.admitPendingLocked(r)
 	m.cond.Signal()
 	m.wakeExpiry()
@@ -454,7 +455,7 @@ func (p preparedRequest) makeRecord(id string, now time.Time) *record {
 		Tool: p.request.Tool, State: Queued, CleanupStatus: "not_needed", CreatedAt: now, ReadyAt: &now,
 		QueueTimeout: p.queueTimeout, ExecutionTimeout: p.runTimeout, OutputLimitBytes: p.outputLimit,
 		ArgumentLimitBytes: p.policy.maxArgumentBytes, ResultLimitBytes: p.policy.maxResultBytes},
-		arguments: p.arguments, deadline: now.Add(p.queueTimeout)}
+		arguments: p.arguments, deadline: now.Add(p.queueTimeout), deadlineIndex: -1}
 }
 
 func resolveTimeout(given, fallback, maximum time.Duration) (time.Duration, error) {
@@ -566,7 +567,7 @@ func (m *Manager) Cancel(id string) (Snapshot, error) {
 func (m *Manager) Stats() Stats {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return Stats{Queued: len(m.queue), Pending: m.pending, Running: m.running, Stored: len(m.records), Tenants: len(m.tenants), Halted: m.halted, Closing: m.closing}
+	return Stats{Queued: m.pending, Pending: m.pending, Running: m.running, Stored: len(m.records), Tenants: len(m.tenants), Halted: m.halted, Closing: m.closing}
 }
 
 // Close stops admission and running work, then waits for owned goroutines.
@@ -578,10 +579,9 @@ func (m *Manager) Close(ctx context.Context) error {
 	if !m.closing {
 		m.closing = true
 		if m.store == nil {
-			for len(m.queue) > 0 {
-				r := m.queue[0]
-				m.queue[0] = nil
-				m.queue = m.queue[1:]
+			for len(m.deadlines) > 0 {
+				r := m.deadlines[0]
+				m.removeQueued(r)
 				m.releasePendingLocked(r)
 				m.finishLocked(r, Cancelled, "cancelled", "manager closed before execution")
 			}
@@ -638,17 +638,6 @@ func cloneSnapshot(s Snapshot) Snapshot {
 		s.ExitCode = &value
 	}
 	return s
-}
-
-func (m *Manager) removeQueued(target *record) {
-	for i, r := range m.queue {
-		if r == target {
-			copy(m.queue[i:], m.queue[i+1:])
-			m.queue[len(m.queue)-1] = nil
-			m.queue = m.queue[:len(m.queue)-1]
-			return
-		}
-	}
 }
 
 func (m *Manager) applySnapshotLocked(r *record, next Snapshot) bool {
