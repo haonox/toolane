@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/haonox/toolane/internal/storage/sqlite"
 	"github.com/haonox/toolane/internal/tool"
 )
 
@@ -41,13 +42,14 @@ var (
 type State string
 
 const (
-	Queued     State = "queued"
-	Running    State = "running"
-	Cancelling State = "cancelling"
-	Succeeded  State = "succeeded"
-	Failed     State = "failed"
-	TimedOut   State = "timed_out"
-	Cancelled  State = "cancelled"
+	Queued      State = "queued"
+	Running     State = "running"
+	Cancelling  State = "cancelling"
+	Succeeded   State = "succeeded"
+	Failed      State = "failed"
+	TimedOut    State = "timed_out"
+	Cancelled   State = "cancelled"
+	Interrupted State = "interrupted"
 )
 
 // Config bounds active work and retained results. Use DefaultConfig as a
@@ -147,11 +149,13 @@ type Snapshot struct {
 }
 
 type record struct {
-	snapshot  Snapshot
-	arguments json.RawMessage
-	deadline  time.Time
-	cancel    context.CancelFunc
-	tenant    *tenantState
+	snapshot      Snapshot
+	arguments     json.RawMessage
+	deadline      time.Time
+	cancel        context.CancelFunc
+	tenant        *tenantState
+	storeSequence int64
+	storeVersion  int64
 }
 
 // Stats reports current capacity use. It is a snapshot, not a reservation.
@@ -176,6 +180,8 @@ type Manager struct {
 	tools              map[string]tool.Definition
 	policies           map[string]effectivePolicy
 	records            map[string]*record
+	store              *sqlite.Store
+	storageErr         error
 	tenants            map[string]*tenantState
 	tenantOrder        []string
 	rrCursor           int
@@ -194,6 +200,31 @@ type Manager struct {
 // NewManager freezes the registry and starts a fixed worker pool plus one queue
 // deadline monitor. Call Close to stop them.
 func NewManager(config Config, registry *tool.Registry, observers ...func(Snapshot, Snapshot)) (*Manager, error) {
+	return newManager(config, registry, nil, observers...)
+}
+
+// NewPersistentManager opens a durable execution store and recovers accepted
+// work before starting workers. Close releases the database lock.
+func NewPersistentManager(config Config, registry *tool.Registry, databasePath string, observers ...func(Snapshot, Snapshot)) (*Manager, error) {
+	if err := config.validate(); err != nil {
+		return nil, err
+	}
+	if registry == nil {
+		return nil, errors.New("nil tool registry")
+	}
+	store, err := sqlite.Open(databasePath)
+	if err != nil {
+		return nil, err
+	}
+	m, err := newManager(config, registry, store, observers...)
+	if err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	return m, nil
+}
+
+func newManager(config Config, registry *tool.Registry, store *sqlite.Store, observers ...func(Snapshot, Snapshot)) (*Manager, error) {
 	if len(observers) > 1 {
 		return nil, errors.New("at most one observer allowed")
 	}
@@ -214,6 +245,7 @@ func NewManager(config Config, registry *tool.Registry, observers ...func(Snapsh
 	}
 	m := &Manager{
 		config:   config,
+		store:    store,
 		tools:    definitions,
 		policies: policies,
 		records:  make(map[string]*record),
@@ -226,6 +258,11 @@ func NewManager(config Config, registry *tool.Registry, observers ...func(Snapsh
 		m.transitionObserver = observers[0]
 	}
 	m.cond = sync.NewCond(&m.mu)
+	if store != nil {
+		if err := m.recoverStored(); err != nil {
+			return nil, err
+		}
+	}
 	m.workers.Add(config.Workers + 1)
 	for range config.Workers {
 		go m.worker()
@@ -233,6 +270,13 @@ func NewManager(config Config, registry *tool.Registry, observers ...func(Snapsh
 	go m.expireQueued()
 	go func() {
 		m.workers.Wait()
+		if m.store != nil {
+			if err := m.store.Close(); err != nil {
+				m.mu.Lock()
+				m.storageErr = errors.Join(m.storageErr, err)
+				m.mu.Unlock()
+			}
+		}
 		close(m.done)
 	}()
 	return m, nil
@@ -262,6 +306,18 @@ func (m *Manager) Submit(ctx context.Context, req Request) (Snapshot, error) {
 	}
 	now := time.Now().UTC()
 	r := prepared.makeRecord(id, now)
+	if m.store != nil {
+		image, err := m.storedRecord(r, r.snapshot)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		stored, err := m.store.Insert(context.Background(), image)
+		if err != nil {
+			m.haltStorageLocked(err)
+			return Snapshot{}, ErrBackendUnavailable
+		}
+		r.storeSequence, r.storeVersion = stored.Sequence, stored.Version
+	}
 	m.records[id] = r
 	m.queue = append(m.queue, r)
 	m.admitPendingLocked(r)
@@ -315,6 +371,9 @@ func (m *Manager) prepareRequest(ctx context.Context, req Request) (preparedRequ
 	if len(req.Arguments) > policy.maxArgumentBytes {
 		return preparedRequest{}, ErrArgumentsTooLarge
 	}
+	if len(req.Arguments) > 0 && !json.Valid(req.Arguments) {
+		return preparedRequest{}, fmt.Errorf("%w: invalid JSON arguments", ErrInvalidRequest)
+	}
 	arguments := append(json.RawMessage(nil), req.Arguments...)
 	if err := def.Validate(arguments); err != nil {
 		return preparedRequest{}, fmt.Errorf("%w: invalid tool arguments: %v", ErrInvalidRequest, err)
@@ -361,13 +420,29 @@ func newID() (string, error) {
 	return hex.EncodeToString(data[:]), nil
 }
 
-// Get returns a copy of a retained execution record.
+// Get returns a copy of an execution record, loading an evicted terminal
+// snapshot from SQLite for persistent managers.
 func (m *Manager) Get(id string) (Snapshot, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	r, ok := m.records[id]
 	if !ok {
-		return Snapshot{}, ErrNotFound
+		if m.store == nil {
+			return Snapshot{}, ErrNotFound
+		}
+		stored, err := m.store.Get(context.Background(), id)
+		if errors.Is(err, sqlite.ErrNotFound) {
+			return Snapshot{}, ErrNotFound
+		}
+		if err != nil {
+			m.haltStorageLocked(err)
+			return Snapshot{}, ErrBackendUnavailable
+		}
+		r, err = decodeStored(stored)
+		if err != nil {
+			m.haltStorageLocked(err)
+			return Snapshot{}, ErrBackendUnavailable
+		}
 	}
 	return cloneSnapshot(r.snapshot), nil
 }
@@ -378,21 +453,43 @@ func (m *Manager) Cancel(id string) (Snapshot, error) {
 	m.mu.Lock()
 	r, ok := m.records[id]
 	if !ok {
+		if m.store != nil {
+			stored, err := m.store.Get(context.Background(), id)
+			if err == nil {
+				r, err = decodeStored(stored)
+				if err == nil && r.snapshot.FinishedAt != nil {
+					snapshot := cloneSnapshot(r.snapshot)
+					m.mu.Unlock()
+					return snapshot, nil
+				}
+			}
+			if err != nil && !errors.Is(err, sqlite.ErrNotFound) {
+				m.haltStorageLocked(err)
+				m.mu.Unlock()
+				return Snapshot{}, ErrBackendUnavailable
+			}
+		}
 		m.mu.Unlock()
 		return Snapshot{}, ErrNotFound
 	}
 	var cancel context.CancelFunc
 	switch r.snapshot.State {
 	case Queued:
+		if !m.finishLocked(r, Cancelled, "cancelled", "cancelled before execution") {
+			m.mu.Unlock()
+			return Snapshot{}, ErrBackendUnavailable
+		}
 		m.removeQueued(r)
 		m.releasePendingLocked(r)
-		m.finishLocked(r, Cancelled, "cancelled", "cancelled before execution")
 		m.wakeExpiry()
 	case Running:
 		next := cloneSnapshot(r.snapshot)
 		next.State = Cancelling
 		next.StopReason = "user_cancelled"
-		m.applySnapshotLocked(r, next)
+		if !m.applySnapshotLocked(r, next) {
+			m.mu.Unlock()
+			return Snapshot{}, ErrBackendUnavailable
+		}
 		cancel = r.cancel
 	}
 	snapshot := cloneSnapshot(r.snapshot)
@@ -410,20 +507,22 @@ func (m *Manager) Stats() Stats {
 	return Stats{Queued: len(m.queue), Pending: m.pending, Running: m.running, Stored: len(m.records), Tenants: len(m.tenants), Halted: m.halted, Closing: m.closing}
 }
 
-// Close stops admission, cancels accepted work, and waits for all owned
-// goroutines. A context deadline bounds the caller's wait while cleanup keeps
-// running until cooperative executors return.
+// Close stops admission and running work, then waits for owned goroutines.
+// Persistent managers leave queued work on disk for the next startup;
+// in-memory managers cancel it. A context deadline bounds the caller's wait.
 func (m *Manager) Close(ctx context.Context) error {
 	m.mu.Lock()
 	var cancels []context.CancelFunc
 	if !m.closing {
 		m.closing = true
-		for len(m.queue) > 0 {
-			r := m.queue[0]
-			m.queue[0] = nil
-			m.queue = m.queue[1:]
-			m.releasePendingLocked(r)
-			m.finishLocked(r, Cancelled, "cancelled", "manager closed before execution")
+		if m.store == nil {
+			for len(m.queue) > 0 {
+				r := m.queue[0]
+				m.queue[0] = nil
+				m.queue = m.queue[1:]
+				m.releasePendingLocked(r)
+				m.finishLocked(r, Cancelled, "cancelled", "manager closed before execution")
+			}
 		}
 		for _, r := range m.records {
 			if r.snapshot.State == Running {
@@ -446,9 +545,9 @@ func (m *Manager) Close(ctx context.Context) error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if m.running != 0 {
-			return ErrStopUnconfirmed
+			return errors.Join(ErrStopUnconfirmed, m.storageErr)
 		}
-		return nil
+		return m.storageErr
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -490,28 +589,35 @@ func (m *Manager) removeQueued(target *record) {
 	}
 }
 
-func (m *Manager) applySnapshotLocked(r *record, next Snapshot) {
+func (m *Manager) applySnapshotLocked(r *record, next Snapshot) bool {
+	if err := m.persistSnapshotLocked(r, next); err != nil {
+		m.haltStorageLocked(err)
+		return false
+	}
 	before := r.snapshot
 	r.snapshot = next
 	if m.transitionObserver != nil {
 		m.transitionObserver(before, next)
 	}
+	return true
 }
 
-func (m *Manager) finishLocked(r *record, state State, code, message string) {
-	m.finishWithSnapshotLocked(r, r.snapshot, state, code, message)
+func (m *Manager) finishLocked(r *record, state State, code, message string) bool {
+	return m.finishWithSnapshotLocked(r, r.snapshot, state, code, message)
 }
 
-func (m *Manager) finishWithSnapshotLocked(r *record, base Snapshot, state State, code, message string) {
+func (m *Manager) finishWithSnapshotLocked(r *record, base Snapshot, state State, code, message string) bool {
 	if r.snapshot.FinishedAt != nil {
-		return
+		return true
 	}
 	next := cloneSnapshot(base)
 	next.State, next.ErrorCode = state, code
 	next.ErrorMessage = m.limitErrorMessage(message)
 	now := time.Now().UTC()
 	next.FinishedAt = &now
-	m.applySnapshotLocked(r, next)
+	if !m.applySnapshotLocked(r, next) {
+		return false
+	}
 	r.arguments = nil
 	m.terminal = append(m.terminal, r.snapshot.ID)
 	for len(m.terminal) > m.config.RetainedResults {
@@ -519,6 +625,7 @@ func (m *Manager) finishWithSnapshotLocked(r *record, base Snapshot, state State
 		m.terminal[0] = ""
 		m.terminal = m.terminal[1:]
 	}
+	return true
 }
 
 func (m *Manager) limitErrorMessage(message string) string {

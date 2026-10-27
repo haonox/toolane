@@ -44,7 +44,7 @@ flowchart TD
     B -- 未通过 --> R1["返回请求错误"]
     B -- 通过 --> C{"全局与租户待处理容量"}
     C -- 已满 --> R2["返回 429"]
-    C -- 可接收 --> D["创建 queued 任务<br/>返回 202 和 execution_id"]
+    C -- 可接收 --> D["持久化 queued 任务<br/>返回 202 和 execution_id"]
     D --> E["有界队列按租户轮询<br/>遵守每租户运行上限"]
     E --> F{"排队期间超时或取消？"}
     F -- 是 --> I["记录最终状态、结果或错误"]
@@ -54,16 +54,19 @@ flowchart TD
     D -. "Agent 持 execution_id 轮询 GET /api/v1/executions/{id}" .-> J{"任务是否结束？"}
     I --> J
     J -- 否，稍后继续查询 --> J
-    J -- 是 --> K["返回 succeeded、failed、timed_out 或 cancelled<br/>以及结果或错误"]
+    J -- 是 --> K["返回 succeeded、failed、timed_out、cancelled 或 interrupted<br/>以及结果或错误"]
     K --> L["Agent 程序关联模型 call_id<br/>将结果交还模型"]
 ```
 
 提交成功只表示任务已被接收，结果通过后续查询取得，Toolane 当前不会主动推送结果。调度和配额按租户生效，`agent_id` 只是可选的任务标识，不参与调度。
 
+HTTP 服务会在返回 `202` 前将任务提交到 SQLite。重启后，未过排队截止时间且工具仍已配置的任务继续排队；终态及结果仍可用原 `execution_id` 查询。重启前处于 `running` 或 `cancelling` 的任务转为 `interrupted`，其外部副作用可能已经发生，服务不会自动重试。排队超时或工具已移除的任务在恢复时形成相应终态。恢复的排队任务使用重启后的工具定义；修改工具行为时应考虑与旧任务的兼容性。异常杀死服务进程时，进程工具的子进程清理还取决于部署所用的进程管理器。客户端若在收到 `202` 前断线，重复提交可能产生新任务；提交幂等键将在后续阶段加入。
+
 ## 核心能力
 
 - 固定 Worker 数、有界队列、租户轮询调度与每租户运行上限。
 - 排队超时、执行超时、取消、输出与结果大小限制。
+- SQLite 持久化已接收任务、状态和结果；内存维护租户调度索引。
 - Mock 工具用于学习和测试；Process 工具只运行服务端注册的可信程序。
 - Bearer Token 绑定租户和工具权限；业务与指标服务分别监听本机回环地址上的两个端口。
 
@@ -104,7 +107,9 @@ go run ./cmd/toolane demo process
 | `tenant_pending_limit` | 每租户待处理任务数上限 | 64 |
 | `retained_results` | 内存中保留的终态任务条数上限 | 1000 |
 
-可以只填写需要覆盖的字段；所有配置值都必须是正整数，显式配置为零或负数会使服务启动失败。增大 `retained_results` 会增加内存占用，也不会使任务记录在服务重启后保留。
+可以只填写需要覆盖的字段；所有配置值都必须是正整数，显式配置为零或负数会使服务启动失败。`retained_results` 只限制内存中的终态缓存；SQLite 中的终态与结果仍可查询。本阶段尚未加入磁盘结果保留期与清理，部署时需监控磁盘容量。
+
+可选的 `database_path` 必须是绝对路径。未填写时，服务使用配置文件同目录下的 `toolane-state/executions.sqlite`。服务会创建数据库目录并要求它仅对当前用户开放（权限 `0700`）；数据库文件权限为 `0600`。请把该目录放在重启后仍保留的磁盘上；备份前先正常停止服务，再保存该目录。同一数据库一次只允许一个服务实例使用。
 
 ```bash
 chmod 600 /absolute/private/server.json
@@ -147,6 +152,7 @@ curl -sS http://127.0.0.1:8080/api/v1/executions \
 | `cmd/toolane/` | CLI 演示和 HTTP 服务启动 |
 | `internal/tool/` | 工具注册、定义与参数校验 |
 | `internal/execution/` | 任务状态、准入、队列、调度、Worker |
+| `internal/storage/sqlite/` | 执行记录持久化与 schema 迁移 |
 | `internal/executor/` | Mock 与可信 Process 执行 |
 | `internal/httpapi/` | Token 授权与 HTTP 接口 |
 | `internal/observability/` | 日志和指标 |

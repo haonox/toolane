@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"sync/atomic"
@@ -25,6 +26,7 @@ import (
 
 type serverConfig struct {
 	BusinessListen string                    `json:"business_listen"`
+	DatabasePath   string                    `json:"database_path,omitempty"`
 	Tokens         []httpapi.Token           `json:"tokens"`
 	MetricsListen  string                    `json:"metrics_listen,omitempty"`
 	ProcessTools   []serverProcessToolConfig `json:"process_tools,omitempty"`
@@ -113,6 +115,16 @@ func loadServerConfig(path string) (serverConfig, error) {
 	}
 	if config.BusinessListen == "" {
 		config.BusinessListen = "127.0.0.1:8080"
+	}
+	if config.DatabasePath == "" {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return serverConfig{}, fmt.Errorf("resolve server config path: %w", err)
+		}
+		config.DatabasePath = filepath.Join(filepath.Dir(absolute), "toolane-state", "executions.sqlite")
+	}
+	if !filepath.IsAbs(config.DatabasePath) {
+		return serverConfig{}, errors.New("database_path must be absolute")
 	}
 	host, port, err := net.SplitHostPort(config.BusinessListen)
 	if err != nil || host != "localhost" && (net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback()) {
@@ -207,7 +219,10 @@ func runServerWithLogger(ctx context.Context, configPath string, logger *slog.Lo
 	}()
 
 	// Manager 按配置启动 Worker 和排队超时监视器；回调把状态变化记录为指标与日志。
-	manager, err := execution.NewManager(config.executionConfig(), registry,
+	if err := os.MkdirAll(filepath.Dir(config.DatabasePath), 0700); err != nil {
+		return fmt.Errorf("create SQLite directory: %w", err)
+	}
+	manager, err := execution.NewPersistentManager(config.executionConfig(), registry, config.DatabasePath,
 		func(before, after execution.Snapshot) {
 			metrics.RecordChange(observability.Change{BeforeState: string(before.State), AfterState: string(after.State),
 				BeforeCleanup: before.CleanupStatus, AfterCleanup: after.CleanupStatus, CreatedAt: after.CreatedAt,
