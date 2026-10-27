@@ -59,6 +59,13 @@ def main() -> int:
         raise ValueError("stages need positive concurrency and request counts")
     run_dir = GENERATED / "results" / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + f"-{os.getpid()}")
     run_dir.mkdir(parents=True, mode=0o700)
+    # Each run starts with a fresh durable database, so prior benchmark calls
+    # cannot affect admission, result retention, or the measured workload.
+    run_config = run_dir / "server.json"
+    config["database_path"] = str(run_dir / "executions.sqlite")
+    with os.fdopen(os.open(run_config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as stream:
+        json.dump(config, stream, ensure_ascii=False, indent=2)
+        stream.write("\n")
     build_env = dict(os.environ, GOCACHE=str(GENERATED / "go-cache"))
     subprocess.run(["go", "build", "-o", str(GENERATED / "toolane"), "./cmd/toolane"], cwd=REPO, env=build_env, check=True)
     subprocess.run(["go", "build", "-o", str(GENERATED / "load"), "./benchmarks/http"], cwd=REPO, env=build_env, check=True)
@@ -79,7 +86,7 @@ def main() -> int:
     print(f"Results: {run_dir}", flush=True)
     completed_rates = {}
     with (run_dir / "server.log").open("w", encoding="utf-8") as log:
-        server = subprocess.Popen([str(GENERATED / "toolane"), "serve", "--config", str(SERVER)],
+        server = subprocess.Popen([str(GENERATED / "toolane"), "serve", "--config", str(run_config)],
                                   cwd=REPO, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             for _ in range(100):
@@ -107,7 +114,7 @@ def main() -> int:
                 output = run_dir / f"{name}.json"
                 metrics(metrics_url, run_dir / f"{name}-before.prom")
                 started = time.monotonic()
-                command = [str(GENERATED / "load"), "-base-url", base_url, "-tokens-file", str(SERVER),
+                command = [str(GENERATED / "load"), "-base-url", base_url, "-tokens-file", str(run_config),
                            "-workload-file", str(workload_path),
                            "-requests", str(stage["requests"]), "-concurrency", str(stage["concurrency"]),
                            "-wait-timeout", "60s", "-output", str(output)]

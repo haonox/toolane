@@ -11,7 +11,7 @@ import (
 var (
 	admissionKinds   = [...]string{"execution"}
 	admissionResults = [...]string{"accepted", "invalid", "unauthorized", "capacity", "unavailable", "other"}
-	terminalStates   = [...]string{"succeeded", "failed", "timed_out", "cancelled"}
+	terminalStates   = [...]string{"succeeded", "failed", "timed_out", "cancelled", "interrupted"}
 	durationBuckets  = [...]float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60}
 )
 

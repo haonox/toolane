@@ -29,7 +29,8 @@ func TestLoadServerConfigRequiresPrivateLoopbackConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	config, err := loadServerConfig(path)
-	if err != nil || config.BusinessListen != "127.0.0.1:0" || config.MetricsListen != "127.0.0.1:9090" || len(config.Tokens) != 1 {
+	if err != nil || config.BusinessListen != "127.0.0.1:0" || config.MetricsListen != "127.0.0.1:9090" || len(config.Tokens) != 1 ||
+		config.DatabasePath != filepath.Join(dir, "toolane-state", "executions.sqlite") {
 		t.Fatalf("valid config: %+v err=%v", config, err)
 	}
 	for _, raw := range []string{
@@ -39,6 +40,7 @@ func TestLoadServerConfigRequiresPrivateLoopbackConfiguration(t *testing.T) {
 		strings.Replace(valid, "business_listen", "listen", 1),
 		valid + `{}`,
 		strings.Replace(valid, `"tokens":`, `"unsupported_option":true,"tokens":`, 1),
+		strings.Replace(valid, `"tokens":`, `"database_path":"relative.sqlite","tokens":`, 1),
 	} {
 		if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
 			t.Fatal(err)
@@ -298,5 +300,49 @@ func TestRunServerStartsAndStopsLocalAPI(t *testing.T) {
 		if !seen[message] {
 			t.Fatalf("missing %s log: %s", message, logText)
 		}
+	}
+	if info, err := os.Stat(filepath.Join(dir, "toolane-state", "executions.sqlite")); err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("durable database permissions: %v, %v", info, err)
+	}
+	// The same execution ID and result remain available after a service restart.
+	restartCtx, stopRestart := context.WithCancel(context.Background())
+	restarted := make(chan error, 1)
+	go func() {
+		restarted <- runServerWithLogger(restartCtx, path, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	}()
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		response, err := client.Get(base + "/readyz")
+		if err == nil {
+			_ = response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			stopRestart()
+			<-restarted
+			t.Fatalf("restarted service did not become ready: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	query, err := http.NewRequest(http.MethodGet, base+"/api/v1/executions/"+accepted.ExecutionID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query.Header.Set("Authorization", "Bearer local-test-secret-123456")
+	response, err = client.Do(query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recovered execution.Snapshot
+	decodeErr = json.NewDecoder(response.Body).Decode(&recovered)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || decodeErr != nil || recovered.State != execution.Succeeded || recovered.FinishedAt == nil {
+		t.Fatalf("recovered HTTP result: status=%d snapshot=%+v err=%v", response.StatusCode, recovered, decodeErr)
+	}
+	stopRestart()
+	if err := <-restarted; err != nil {
+		t.Fatalf("restarted service shutdown: %v", err)
 	}
 }

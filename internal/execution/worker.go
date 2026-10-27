@@ -53,15 +53,21 @@ func (m *Manager) claim() (*record, Snapshot, context.Context, bool) {
 		}
 		m.wakeExpiry()
 		if !time.Now().Before(r.deadline) {
+			if !m.finishLocked(r, TimedOut, "queue_timeout", "queue wait expired") {
+				m.queue = append(m.queue, r)
+				return nil, Snapshot{}, nil, false
+			}
 			m.releasePendingLocked(r)
-			m.finishLocked(r, TimedOut, "queue_timeout", "queue wait expired")
 			continue
 		}
 		now := time.Now().UTC()
 		next := cloneSnapshot(r.snapshot)
 		next.State = Running
 		next.RunningAt = &now
-		m.applySnapshotLocked(r, next)
+		if !m.applySnapshotLocked(r, next) {
+			m.queue = append(m.queue, r)
+			return nil, Snapshot{}, nil, false
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), r.snapshot.ExecutionTimeout)
 		r.cancel = cancel
 		m.claimSlotLocked(r)
@@ -107,8 +113,9 @@ func (m *Manager) outputLimitReached(r *record) {
 		next := cloneSnapshot(r.snapshot)
 		next.State = Cancelling
 		next.StopReason = "output_limit_exceeded"
-		m.applySnapshotLocked(r, next)
-		cancel = r.cancel
+		if m.applySnapshotLocked(r, next) {
+			cancel = r.cancel
+		}
 	}
 	m.mu.Unlock()
 	if cancel != nil {
@@ -121,7 +128,9 @@ func (m *Manager) processStarted(r *record, at time.Time) {
 	defer m.mu.Unlock()
 	if r.snapshot.State == Running || r.snapshot.State == Cancelling {
 		at = at.UTC()
-		r.snapshot.ProcessStartedAt = &at
+		next := cloneSnapshot(r.snapshot)
+		next.ProcessStartedAt = &at
+		m.applySnapshotLocked(r, next)
 	}
 }
 
@@ -130,52 +139,55 @@ func (m *Manager) complete(r *record, ctx context.Context, outcome tool.Outcome,
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	defer r.cancel()
+	next := cloneSnapshot(r.snapshot)
 	if outcome.ProcessStartedAt != nil {
-		r.snapshot.ProcessStartedAt = outcome.ProcessStartedAt
+		next.ProcessStartedAt = outcome.ProcessStartedAt
 	}
-	r.snapshot.ExitCode = outcome.ExitCode
-	r.snapshot.OutputTruncated = outcome.OutputTruncated
+	next.ExitCode = outcome.ExitCode
+	next.OutputTruncated = outcome.OutputTruncated
 	stdout, stderr := outcome.Stdout, outcome.Stderr
-	limit := r.snapshot.OutputLimitBytes
+	limit := next.OutputLimitBytes
 	if len(stdout) > limit {
 		stdout = stdout[:limit]
-		r.snapshot.OutputTruncated = true
+		next.OutputTruncated = true
 	}
 	if len(stderr) > limit-len(stdout) {
 		stderr = stderr[:limit-len(stdout)]
-		r.snapshot.OutputTruncated = true
+		next.OutputTruncated = true
 	}
-	r.snapshot.Stdout = strings.ToValidUTF8(stdout, "?")
-	r.snapshot.Stderr = strings.ToValidUTF8(stderr, "?")
+	next.Stdout = strings.ToValidUTF8(stdout, "?")
+	next.Stderr = strings.ToValidUTF8(stderr, "?")
 	if outcome.StopUnconfirmed {
-		if r.snapshot.State == Running {
-			r.snapshot.State = Cancelling
-			r.snapshot.StopReason = "stop_unconfirmed"
+		if next.State == Running {
+			next.State = Cancelling
+			next.StopReason = "stop_unconfirmed"
 		}
-		r.snapshot.CleanupStatus = "failed"
+		next.CleanupStatus = "failed"
 		if err != nil {
-			r.snapshot.ErrorMessage = m.limitErrorMessage(err.Error())
+			next.ErrorMessage = m.limitErrorMessage(err.Error())
 		}
+		m.applySnapshotLocked(r, next)
 		m.halted = true
 		m.cond.Broadcast()
 		return false
 	}
-	if r.snapshot.State == Running && ctx.Err() == context.DeadlineExceeded {
-		r.snapshot.State = Cancelling
-		r.snapshot.StopReason = "execution_timeout"
+	if next.State == Running && ctx.Err() == context.DeadlineExceeded {
+		next.State = Cancelling
+		next.StopReason = "execution_timeout"
 	}
-	if r.snapshot.State == Running && r.snapshot.OutputTruncated {
-		r.snapshot.State = Cancelling
-		r.snapshot.StopReason = "output_limit_exceeded"
+	if next.State == Running && next.OutputTruncated {
+		next.State = Cancelling
+		next.StopReason = "output_limit_exceeded"
 	}
-	if r.snapshot.State == Cancelling {
-		switch r.snapshot.StopReason {
+	var committed bool
+	if next.State == Cancelling {
+		switch next.StopReason {
 		case "execution_timeout":
-			m.finishLocked(r, TimedOut, "execution_timeout", "execution deadline expired")
+			committed = m.finishWithSnapshotLocked(r, next, TimedOut, "execution_timeout", "execution deadline expired")
 		case "output_limit_exceeded":
-			m.finishLocked(r, Failed, "output_limit_exceeded", "combined stdout and stderr exceeded limit")
+			committed = m.finishWithSnapshotLocked(r, next, Failed, "output_limit_exceeded", "combined stdout and stderr exceeded limit")
 		default:
-			m.finishLocked(r, Cancelled, "cancelled", "execution stopped")
+			committed = m.finishWithSnapshotLocked(r, next, Cancelled, "cancelled", "execution stopped")
 		}
 	} else if err != nil {
 		code := "execution_failed"
@@ -183,14 +195,17 @@ func (m *Manager) complete(r *record, ctx context.Context, outcome tool.Outcome,
 		if errors.As(err, &runErr) && runErr != nil && runErr.Code != "" {
 			code = runErr.Code
 		}
-		m.finishLocked(r, Failed, code, err.Error())
-	} else if len(outcome.Result) > r.snapshot.ResultLimitBytes {
-		m.finishLocked(r, Failed, "result_limit_exceeded", "structured result exceeds limit")
+		committed = m.finishWithSnapshotLocked(r, next, Failed, code, err.Error())
+	} else if len(outcome.Result) > next.ResultLimitBytes {
+		committed = m.finishWithSnapshotLocked(r, next, Failed, "result_limit_exceeded", "structured result exceeds limit")
 	} else if len(outcome.Result) > 0 && !json.Valid(outcome.Result) {
-		m.finishLocked(r, Failed, "invalid_result", "executor returned invalid JSON")
+		committed = m.finishWithSnapshotLocked(r, next, Failed, "invalid_result", "executor returned invalid JSON")
 	} else {
-		r.snapshot.Result = append(json.RawMessage(nil), outcome.Result...)
-		m.finishLocked(r, Succeeded, "", "")
+		next.Result = append(json.RawMessage(nil), outcome.Result...)
+		committed = m.finishWithSnapshotLocked(r, next, Succeeded, "", "")
+	}
+	if !committed {
+		return false
 	}
 	m.releaseRunningLocked(r)
 	return true
@@ -206,6 +221,11 @@ func (m *Manager) expireQueued() {
 			m.mu.Unlock()
 			return
 		}
+		if m.halted {
+			m.mu.Unlock()
+			<-m.stop
+			return
+		}
 		now := time.Now()
 		var next time.Time
 		for _, r := range m.records {
@@ -213,11 +233,13 @@ func (m *Manager) expireQueued() {
 				continue
 			}
 			if !now.Before(r.deadline) {
-				if r.snapshot.State == Queued {
-					m.removeQueued(r)
+				if !m.finishLocked(r, TimedOut, "queue_timeout", "queue wait expired") {
+					m.mu.Unlock()
+					<-m.stop
+					return
 				}
+				m.removeQueued(r)
 				m.releasePendingLocked(r)
-				m.finishLocked(r, TimedOut, "queue_timeout", "queue wait expired")
 				continue
 			}
 			if next.IsZero() || r.deadline.Before(next) {
