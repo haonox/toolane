@@ -111,14 +111,14 @@ func TestServerExecutionConfigOverridesAndRejectsInvalidCapacity(t *testing.T) {
 		t.Fatalf("partial execution config: %+v", config.executionConfig())
 	}
 	write(`{` + base + `,"execution":{"workers":32,"queue_capacity":4096,` +
-		`"tenant_running_limit":8,"tenant_pending_limit":512,"retained_results":10000}}`)
+		`"tenant_running_limit":8,"tenant_pending_limit":512,"retained_results":10000,"result_retention_seconds":3600}}`)
 	config, err = loadServerConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	capacity := config.executionConfig()
 	if capacity.Workers != 32 || capacity.QueueCapacity != 4096 || capacity.TenantRunningLimit != 8 ||
-		capacity.TenantPendingLimit != 512 || capacity.RetainedResults != 10000 ||
+		capacity.TenantPendingLimit != 512 || capacity.RetainedResults != 10000 || capacity.ResultRetention != time.Hour ||
 		capacity.MaxArgumentBytes != execution.DefaultConfig().MaxArgumentBytes {
 		t.Fatalf("wrong execution capacity: %+v", capacity)
 	}
@@ -129,6 +129,12 @@ func TestServerExecutionConfigOverridesAndRejectsInvalidCapacity(t *testing.T) {
 	write(`{` + base + `,"execution":{"unknown_capacity":1}}`)
 	if _, err := loadServerConfig(path); err == nil {
 		t.Fatal("unknown execution setting accepted")
+	}
+	for _, seconds := range []string{"0", "31536001"} {
+		write(`{` + base + `,"execution":{"result_retention_seconds":` + seconds + `}}`)
+		if _, err := loadServerConfig(path); err == nil {
+			t.Fatalf("invalid result retention %s accepted", seconds)
+		}
 	}
 }
 

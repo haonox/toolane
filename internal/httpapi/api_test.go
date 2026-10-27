@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -48,6 +50,37 @@ func apiFixture(t *testing.T) *API {
 	return api
 }
 
+func persistentAPIFixture(t *testing.T) *API {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	registry := tool.NewRegistry()
+	if err := registry.Register(mock.Definition()); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := execution.NewPersistentManager(execution.DefaultConfig(), registry, filepath.Join(dir, "executions.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := manager.Close(ctx); err != nil {
+			t.Error(err)
+		}
+	})
+	api, err := New(manager, []Token{
+		{Value: firstToken, TenantID: "first", Tools: []string{mock.Name}},
+		{Value: secondToken, TenantID: "second", Tools: []string{mock.Name}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return api
+}
+
 func request(t *testing.T, api *API, method, path, token, body string, _ string) *httptest.ResponseRecorder {
 	t.Helper()
 	r := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -61,6 +94,58 @@ func request(t *testing.T, api *API, method, path, token, body string, _ string)
 		t.Fatal("missing request ID")
 	}
 	return w
+}
+
+func requestWithKey(t *testing.T, api *API, token, key, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/executions", strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer "+token)
+	r.Header.Set("Idempotency-Key", key)
+	w := httptest.NewRecorder()
+	api.ServeHTTP(w, r)
+	return w
+}
+
+func TestHTTPIdempotencyKeyIsTenantScopedAndRejectsConflicts(t *testing.T) {
+	api := persistentAPIFixture(t)
+	body := `{"tool":"mock.delay","arguments":{"delay_ms":1,"value":"ok"}}`
+	first := requestWithKey(t, api, firstToken, "call-123", body)
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first submission = %d %s", first.Code, first.Body.String())
+	}
+	var initial execution.Snapshot
+	if err := json.Unmarshal(first.Body.Bytes(), &initial); err != nil {
+		t.Fatal(err)
+	}
+	replayed := requestWithKey(t, api, firstToken, "call-123", body)
+	var same execution.Snapshot
+	if err := json.Unmarshal(replayed.Body.Bytes(), &same); err != nil || replayed.Code != http.StatusAccepted || same.ID != initial.ID {
+		t.Fatalf("replay = %d %+v %v", replayed.Code, same, err)
+	}
+	conflict := requestWithKey(t, api, firstToken, "call-123", `{"tool":"mock.delay","arguments":{"delay_ms":1,"value":"changed"}}`)
+	if conflict.Code != http.StatusConflict || !strings.Contains(conflict.Body.String(), "idempotency_conflict") {
+		t.Fatalf("key conflict = %d %s", conflict.Code, conflict.Body.String())
+	}
+	other := requestWithKey(t, api, secondToken, "call-123", body)
+	var second execution.Snapshot
+	if err := json.Unmarshal(other.Body.Bytes(), &second); err != nil || other.Code != http.StatusAccepted || second.ID == initial.ID {
+		t.Fatalf("other tenant = %d %+v %v", other.Code, second, err)
+	}
+	for _, key := range []string{"", "contains space", strings.Repeat("a", 129)} {
+		got := requestWithKey(t, api, firstToken, key, body)
+		if got.Code != http.StatusBadRequest {
+			t.Fatalf("invalid key %q = %d %s", key, got.Code, got.Body.String())
+		}
+	}
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/executions", strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer "+firstToken)
+	r.Header.Add("Idempotency-Key", "one")
+	r.Header.Add("Idempotency-Key", "two")
+	w := httptest.NewRecorder()
+	api.ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("repeated key headers = %d %s", w.Code, w.Body.String())
+	}
 }
 
 func TestStructuredRequestLogsKeepIdentityAndExcludePayload(t *testing.T) {

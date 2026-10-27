@@ -33,7 +33,8 @@ var (
 	// ErrTenantQueueFull indicates that a tenant's pending capacity is exhausted.
 	ErrTenantQueueFull = errors.New("tenant pending queue full")
 	// ErrBackendUnavailable indicates that new work is paused after an unconfirmed stop.
-	ErrBackendUnavailable = errors.New("execution backend unavailable")
+	ErrBackendUnavailable  = errors.New("execution backend unavailable")
+	ErrIdempotencyConflict = errors.New("idempotency key reused with a different request")
 	// ErrStopUnconfirmed indicates that shutdown could not confirm all work stopped.
 	ErrStopUnconfirmed = errors.New("execution stop could not be confirmed")
 )
@@ -61,6 +62,7 @@ type Config struct {
 	TenantPendingLimit   int
 	MaxTenantIDBytes     int
 	RetainedResults      int
+	ResultRetention      time.Duration
 	DefaultQueueTimeout  time.Duration
 	MaxQueueTimeout      time.Duration
 	DefaultRunTimeout    time.Duration
@@ -81,6 +83,7 @@ func DefaultConfig() Config {
 		TenantPendingLimit:   64,
 		MaxTenantIDBytes:     256,
 		RetainedResults:      1000,
+		ResultRetention:      24 * time.Hour,
 		DefaultQueueTimeout:  30 * time.Second,
 		MaxQueueTimeout:      300 * time.Second,
 		DefaultRunTimeout:    10 * time.Second,
@@ -100,7 +103,7 @@ func (c Config) validate() error {
 	if c.MaxTenantIDBytes < len("local") {
 		return errors.New("tenant ID byte limit must allow the local tenant")
 	}
-	if c.DefaultQueueTimeout <= 0 || c.MaxQueueTimeout < c.DefaultQueueTimeout ||
+	if c.ResultRetention <= 0 || c.DefaultQueueTimeout <= 0 || c.MaxQueueTimeout < c.DefaultQueueTimeout ||
 		c.DefaultRunTimeout <= 0 || c.MaxRunTimeout < c.DefaultRunTimeout {
 		return errors.New("invalid queue or execution timeout range")
 	}
@@ -112,6 +115,7 @@ func (c Config) validate() error {
 // execution's lifetime.
 type Request struct {
 	TenantID         string
+	IdempotencyKey   string
 	AgentID          string
 	Tool             string
 	Arguments        json.RawMessage
@@ -149,13 +153,15 @@ type Snapshot struct {
 }
 
 type record struct {
-	snapshot      Snapshot
-	arguments     json.RawMessage
-	deadline      time.Time
-	cancel        context.CancelFunc
-	tenant        *tenantState
-	storeSequence int64
-	storeVersion  int64
+	snapshot       Snapshot
+	arguments      json.RawMessage
+	deadline       time.Time
+	cancel         context.CancelFunc
+	tenant         *tenantState
+	storeSequence  int64
+	storeVersion   int64
+	idempotencyKey string
+	requestHash    string
 }
 
 // Stats reports current capacity use. It is a snapshot, not a reservation.
@@ -262,12 +268,19 @@ func newManager(config Config, registry *tool.Registry, store *sqlite.Store, obs
 		if err := m.recoverStored(); err != nil {
 			return nil, err
 		}
+		if _, err := m.cleanupExpiredLocked(); err != nil {
+			return nil, err
+		}
 	}
 	m.workers.Add(config.Workers + 1)
 	for range config.Workers {
 		go m.worker()
 	}
 	go m.expireQueued()
+	if store != nil {
+		m.workers.Add(1)
+		go m.expireTerminal()
+	}
 	go func() {
 		m.workers.Wait()
 		if m.store != nil {
@@ -289,14 +302,48 @@ func (m *Manager) Submit(ctx context.Context, req Request) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	id, err := newID()
-	if err != nil {
-		return Snapshot{}, err
+	var requestHash string
+	if prepared.request.IdempotencyKey != "" {
+		if m.store == nil {
+			return Snapshot{}, fmt.Errorf("%w: idempotency requires persistent storage", ErrInvalidRequest)
+		}
+		requestHash, err = hashPrepared(prepared)
+		if err != nil {
+			return Snapshot{}, err
+		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.admissionError(ctx); err != nil {
 		return Snapshot{}, err
+	}
+	if prepared.request.IdempotencyKey != "" {
+		stored, err := m.store.FindByIdempotency(context.Background(), prepared.request.TenantID, prepared.request.IdempotencyKey)
+		switch {
+		case err == nil:
+			r, decodeErr := decodeStored(stored)
+			if decodeErr != nil {
+				m.haltStorageLocked(decodeErr)
+				return Snapshot{}, ErrBackendUnavailable
+			}
+			if m.expiredSnapshot(r.snapshot, time.Now()) {
+				deleted, deleteErr := m.store.DeleteExpiredID(context.Background(), stored.ID, time.Now().Add(-m.config.ResultRetention))
+				if deleteErr != nil || !deleted {
+					m.haltStorageLocked(errors.Join(deleteErr, errors.New("expired key could not be released")))
+					return Snapshot{}, ErrBackendUnavailable
+				}
+				m.evictTerminalLocked(stored.ID)
+			} else {
+				if stored.RequestHash != requestHash {
+					return Snapshot{}, ErrIdempotencyConflict
+				}
+				return cloneSnapshot(r.snapshot), nil
+			}
+		case errors.Is(err, sqlite.ErrNotFound):
+		default:
+			m.haltStorageLocked(err)
+			return Snapshot{}, ErrBackendUnavailable
+		}
 	}
 	if m.pending >= m.config.QueueCapacity {
 		return Snapshot{}, ErrQueueFull
@@ -304,8 +351,13 @@ func (m *Manager) Submit(ctx context.Context, req Request) (Snapshot, error) {
 	if state := m.tenants[prepared.request.TenantID]; state != nil && state.pending >= m.config.TenantPendingLimit {
 		return Snapshot{}, ErrTenantQueueFull
 	}
+	id, err := newID()
+	if err != nil {
+		return Snapshot{}, err
+	}
 	now := time.Now().UTC()
 	r := prepared.makeRecord(id, now)
+	r.idempotencyKey, r.requestHash = prepared.request.IdempotencyKey, requestHash
 	if m.store != nil {
 		image, err := m.storedRecord(r, r.snapshot)
 		if err != nil {
@@ -347,6 +399,9 @@ func (m *Manager) prepareRequest(ctx context.Context, req Request) (preparedRequ
 	}
 	if len(req.AgentID) > m.config.MaxAgentIDBytes {
 		return preparedRequest{}, ErrAgentIDTooLarge
+	}
+	if req.IdempotencyKey != "" && !validIdempotencyKey(req.IdempotencyKey) {
+		return preparedRequest{}, fmt.Errorf("%w: invalid idempotency key", ErrInvalidRequest)
 	}
 	def, ok := m.tools[req.Tool]
 	if !ok {
@@ -444,6 +499,9 @@ func (m *Manager) Get(id string) (Snapshot, error) {
 			return Snapshot{}, ErrBackendUnavailable
 		}
 	}
+	if m.expiredSnapshot(r.snapshot, time.Now()) {
+		return Snapshot{}, ErrNotFound
+	}
 	return cloneSnapshot(r.snapshot), nil
 }
 
@@ -457,7 +515,7 @@ func (m *Manager) Cancel(id string) (Snapshot, error) {
 			stored, err := m.store.Get(context.Background(), id)
 			if err == nil {
 				r, err = decodeStored(stored)
-				if err == nil && r.snapshot.FinishedAt != nil {
+				if err == nil && r.snapshot.FinishedAt != nil && !m.expiredSnapshot(r.snapshot, time.Now()) {
 					snapshot := cloneSnapshot(r.snapshot)
 					m.mu.Unlock()
 					return snapshot, nil
@@ -469,6 +527,10 @@ func (m *Manager) Cancel(id string) (Snapshot, error) {
 				return Snapshot{}, ErrBackendUnavailable
 			}
 		}
+		m.mu.Unlock()
+		return Snapshot{}, ErrNotFound
+	}
+	if m.expiredSnapshot(r.snapshot, time.Now()) {
 		m.mu.Unlock()
 		return Snapshot{}, ErrNotFound
 	}

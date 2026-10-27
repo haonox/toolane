@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -157,3 +158,95 @@ func TestReadRejectsCorruptActiveRecord(t *testing.T) {
 		t.Fatal("corrupt queued record was loaded for recovery")
 	}
 }
+
+func TestMigrateV1AndTenantScopedIdempotency(t *testing.T) {
+	path := filepath.Join(privateDir(t), "executions.sqlite")
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE executions (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+			tenant_id TEXT NOT NULL, state TEXT NOT NULL, queue_deadline_ns INTEGER NOT NULL,
+			finished_at_ns INTEGER, payload BLOB NOT NULL, version INTEGER NOT NULL)`,
+		`INSERT INTO executions (id, tenant_id, state, queue_deadline_ns, payload, version)
+			VALUES ('legacy', 'tenant-a', 'queued', 2000000000000000000, '{}', 1)`,
+		`PRAGMA user_version = 1`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := openTestStore(t, path)
+	ctx := context.Background()
+	if old, err := store.Get(ctx, "legacy"); err != nil || old.IdempotencyKey != "" || old.RequestHash != "" {
+		t.Fatalf("migrated record = %+v, %v", old, err)
+	}
+	deadline := time.Now().Add(time.Minute)
+	hash := strings.Repeat("a", 64)
+	first := queuedRecord("first", deadline)
+	first.IdempotencyKey, first.RequestHash = "retry-1", hash
+	if _, err := store.Insert(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.FindByIdempotency(ctx, "tenant-a", "retry-1"); err != nil || got.ID != first.ID || got.RequestHash != hash {
+		t.Fatalf("key lookup = %+v, %v", got, err)
+	}
+	duplicate := queuedRecord("duplicate", deadline)
+	duplicate.IdempotencyKey, duplicate.RequestHash = "retry-1", hash
+	if _, err := store.Insert(ctx, duplicate); !errors.Is(err, ErrConflict) {
+		t.Fatalf("same-tenant duplicate key = %v", err)
+	}
+	duplicate.TenantID = "tenant-b"
+	if _, err := store.Insert(ctx, duplicate); err != nil {
+		t.Fatalf("same key in another tenant: %v", err)
+	}
+}
+
+func TestDeleteExpiredResultsPreservesActiveAndRecent(t *testing.T) {
+	store := openTestStore(t, filepath.Join(privateDir(t), "executions.sqlite"))
+	ctx := context.Background()
+	now := time.Now().UTC()
+	old := queuedRecord("old", now)
+	old.State, old.FinishedAt = "succeeded", ptrTime(now.Add(-2*time.Hour))
+	old.IdempotencyKey, old.RequestHash = "old-key", strings.Repeat("b", 64)
+	if _, err := store.Insert(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	recent := queuedRecord("recent", now)
+	recent.State, recent.FinishedAt = "failed", ptrTime(now)
+	if _, err := store.Insert(ctx, recent); err != nil {
+		t.Fatal(err)
+	}
+	active := queuedRecord("active", now.Add(time.Minute))
+	if _, err := store.Insert(ctx, active); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := store.DeleteExpired(ctx, now.Add(-time.Hour), 1)
+	if err != nil || !reflect.DeepEqual(ids, []string{"old"}) {
+		t.Fatalf("deleted IDs = %v, %v", ids, err)
+	}
+	if _, err := store.Get(ctx, "old"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired result remains: %v", err)
+	}
+	if _, err := store.FindByIdempotency(ctx, "tenant-a", "old-key"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired key remains: %v", err)
+	}
+	if _, err := store.Get(ctx, "recent"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get(ctx, "active"); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := store.DeleteExpiredID(ctx, "recent", now.Add(-time.Minute)); err != nil || deleted {
+		t.Fatalf("recent result deleted early: %v, %v", deleted, err)
+	}
+}
+
+func ptrTime(value time.Time) *time.Time { return &value }

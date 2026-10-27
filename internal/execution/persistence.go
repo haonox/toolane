@@ -1,7 +1,10 @@
 package execution
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,7 +38,8 @@ func (m *Manager) storedRecord(r *record, next Snapshot) (sqlite.Record, error) 
 	}
 	return sqlite.Record{Sequence: r.storeSequence, Version: r.storeVersion, ID: next.ID,
 		TenantID: next.TenantID, State: string(next.State), QueueDeadline: r.deadline,
-		FinishedAt: next.FinishedAt, Payload: payload}, nil
+		FinishedAt: next.FinishedAt, Payload: payload, IdempotencyKey: r.idempotencyKey,
+		RequestHash: r.requestHash}, nil
 }
 
 func decodeStored(stored sqlite.Record) (*record, error) {
@@ -56,7 +60,54 @@ func decodeStored(stored sqlite.Record) (*record, error) {
 	s.OutputLimitBytes, s.ArgumentLimitBytes, s.ResultLimitBytes =
 		image.OutputLimitBytes, image.ArgumentLimitBytes, image.ResultLimitBytes
 	return &record{snapshot: s, arguments: append(json.RawMessage(nil), image.Arguments...),
-		deadline: stored.QueueDeadline, storeSequence: stored.Sequence, storeVersion: stored.Version}, nil
+		deadline: stored.QueueDeadline, storeSequence: stored.Sequence, storeVersion: stored.Version,
+		idempotencyKey: stored.IdempotencyKey, requestHash: stored.RequestHash}, nil
+}
+
+func validIdempotencyKey(key string) bool {
+	if len(key) == 0 || len(key) > 128 {
+		return false
+	}
+	for i := range len(key) {
+		c := key[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+			c == '-' || c == '_' || c == '.' || c == '~' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func hashPrepared(p preparedRequest) (string, error) {
+	var arguments json.RawMessage
+	if len(p.arguments) > 0 {
+		decoder := json.NewDecoder(bytes.NewReader(p.arguments))
+		decoder.UseNumber()
+		var value any
+		if err := decoder.Decode(&value); err != nil {
+			return "", fmt.Errorf("canonicalize execution arguments: %w", err)
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return "", fmt.Errorf("canonicalize execution arguments: %w", err)
+		}
+		arguments = encoded
+	}
+	identity := struct {
+		AgentID            string          `json:"agent_id"`
+		Tool               string          `json:"tool"`
+		Arguments          json.RawMessage `json:"arguments"`
+		QueueTimeoutNS     int64           `json:"queue_timeout_ns"`
+		ExecutionTimeoutNS int64           `json:"execution_timeout_ns"`
+		OutputLimitBytes   int             `json:"output_limit_bytes"`
+	}{p.request.AgentID, p.request.Tool, arguments, int64(p.queueTimeout), int64(p.runTimeout), p.outputLimit}
+	encoded, err := json.Marshal(identity)
+	if err != nil {
+		return "", fmt.Errorf("hash execution request: %w", err)
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // recoverStored runs before workers or HTTP listeners exist. A queued record
@@ -129,4 +180,85 @@ func (m *Manager) haltStorageLocked(err error) {
 		}
 	}
 	m.cond.Broadcast()
+}
+
+func (m *Manager) expiredSnapshot(s Snapshot, now time.Time) bool {
+	return m.store != nil && s.FinishedAt != nil && !s.FinishedAt.Add(m.config.ResultRetention).After(now)
+}
+
+const cleanupBatchSize = 1000
+
+// cleanupExpiredLocked removes durable results in bounded transactions and
+// evicts any remaining in-memory copies of the deleted IDs.
+func (m *Manager) cleanupExpiredLocked() (int, error) {
+	if m.store == nil {
+		return 0, nil
+	}
+	ids, err := m.store.DeleteExpired(context.Background(), time.Now().Add(-m.config.ResultRetention), cleanupBatchSize)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired results: %w", err)
+	}
+	if len(ids) > 0 {
+		deleted := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			deleted[id] = struct{}{}
+			if r := m.records[id]; r != nil && r.snapshot.FinishedAt != nil {
+				delete(m.records, id)
+			}
+		}
+		kept := m.terminal[:0]
+		for _, id := range m.terminal {
+			if _, removed := deleted[id]; !removed {
+				kept = append(kept, id)
+			}
+		}
+		m.terminal = kept
+	}
+	return len(ids), nil
+}
+
+func (m *Manager) evictTerminalLocked(id string) {
+	if r := m.records[id]; r != nil && r.snapshot.FinishedAt != nil {
+		delete(m.records, id)
+	}
+	kept := m.terminal[:0]
+	for _, candidate := range m.terminal {
+		if candidate != id {
+			kept = append(kept, candidate)
+		}
+	}
+	m.terminal = kept
+}
+
+func (m *Manager) expireTerminal() {
+	defer m.workers.Done()
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.stop:
+			return
+		case <-ticker.C:
+		}
+		for {
+			m.mu.Lock()
+			if m.closing || m.halted {
+				m.mu.Unlock()
+				break
+			}
+			count, err := m.cleanupExpiredLocked()
+			if err != nil {
+				m.haltStorageLocked(err)
+			}
+			m.mu.Unlock()
+			if err != nil || count < cleanupBatchSize {
+				break
+			}
+			select {
+			case <-m.stop:
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}
 }

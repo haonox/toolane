@@ -296,6 +296,11 @@ func timeout(ms int64) (time.Duration, error) {
 }
 
 func (a *API) submitExecution(w http.ResponseWriter, r *http.Request, p principal) {
+	keys := r.Header.Values("Idempotency-Key")
+	if len(keys) > 1 || len(keys) == 1 && keys[0] == "" {
+		writeError(w, r, http.StatusBadRequest, "invalid_request", "exactly one nonempty Idempotency-Key is allowed")
+		return
+	}
 	var input executionInput
 	if err := decodeBody(w, r, &input); err != nil {
 		writeInputError(w, r, err)
@@ -317,6 +322,9 @@ func (a *API) submitExecution(w http.ResponseWriter, r *http.Request, p principa
 	}
 	req := execution.Request{TenantID: p.tenantID, AgentID: input.AgentID, Tool: input.Tool, Arguments: input.Arguments,
 		QueueTimeout: queueTimeout, ExecutionTimeout: runTimeout, OutputLimitBytes: input.OutputLimitBytes}
+	if len(keys) == 1 {
+		req.IdempotencyKey = keys[0]
+	}
 	snapshot, err := a.manager.Submit(r.Context(), req)
 	if err != nil {
 		a.managerError(w, r, err)
@@ -412,6 +420,8 @@ func (a *API) managerError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, execution.ErrQueueFull), errors.Is(err, execution.ErrTenantQueueFull):
 		w.Header().Set("Retry-After", "1")
 		writeError(w, r, http.StatusTooManyRequests, "capacity_exhausted", "admission capacity exhausted")
+	case errors.Is(err, execution.ErrIdempotencyConflict):
+		writeError(w, r, http.StatusConflict, "idempotency_conflict", "idempotency key already belongs to a different request")
 	case errors.Is(err, execution.ErrBackendUnavailable), errors.Is(err, execution.ErrClosed), a.manager.Stats().Halted:
 		writeError(w, r, http.StatusServiceUnavailable, "backend_unavailable", "execution backend unavailable")
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
