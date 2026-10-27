@@ -61,7 +61,7 @@ func decodeStored(stored sqlite.Record) (*record, error) {
 		image.OutputLimitBytes, image.ArgumentLimitBytes, image.ResultLimitBytes
 	return &record{snapshot: s, arguments: append(json.RawMessage(nil), image.Arguments...),
 		deadline: stored.QueueDeadline, storeSequence: stored.Sequence, storeVersion: stored.Version,
-		idempotencyKey: stored.IdempotencyKey, requestHash: stored.RequestHash}, nil
+		idempotencyKey: stored.IdempotencyKey, requestHash: stored.RequestHash, deadlineIndex: -1}, nil
 }
 
 func validIdempotencyKey(key string) bool {
@@ -126,7 +126,6 @@ func (m *Manager) recoverStored() error {
 		if r.snapshot.State == Queued && time.Now().Before(r.deadline) {
 			if _, ok := m.tools[r.snapshot.Tool]; ok {
 				m.records[r.snapshot.ID] = r
-				m.queue = append(m.queue, r)
 				m.admitPendingLocked(r)
 				continue
 			}

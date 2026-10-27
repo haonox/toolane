@@ -54,7 +54,7 @@ func (m *Manager) claim() (*record, Snapshot, context.Context, bool) {
 		m.wakeExpiry()
 		if !time.Now().Before(r.deadline) {
 			if !m.finishLocked(r, TimedOut, "queue_timeout", "queue wait expired") {
-				m.queue = append(m.queue, r)
+				m.requeueFrontLocked(r)
 				return nil, Snapshot{}, nil, false
 			}
 			m.releasePendingLocked(r)
@@ -65,14 +65,14 @@ func (m *Manager) claim() (*record, Snapshot, context.Context, bool) {
 		next.State = Running
 		next.RunningAt = &now
 		if !m.applySnapshotLocked(r, next) {
-			m.queue = append(m.queue, r)
+			m.requeueFrontLocked(r)
 			return nil, Snapshot{}, nil, false
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), r.snapshot.ExecutionTimeout)
 		r.cancel = cancel
 		m.claimSlotLocked(r)
 		// Another idle worker can claim the next accepted task.
-		if len(m.queue) > 0 {
+		if m.readyTenants.Len() > 0 {
 			m.cond.Signal()
 		}
 		context.AfterFunc(ctx, func() {
@@ -226,13 +226,10 @@ func (m *Manager) expireQueued() {
 			<-m.stop
 			return
 		}
-		now := time.Now()
 		var next time.Time
-		for _, r := range m.records {
-			if r.snapshot.State != Queued {
-				continue
-			}
-			if !now.Before(r.deadline) {
+		for len(m.deadlines) > 0 {
+			r := m.deadlines[0]
+			if !time.Now().Before(r.deadline) {
 				if !m.finishLocked(r, TimedOut, "queue_timeout", "queue wait expired") {
 					m.mu.Unlock()
 					<-m.stop
@@ -242,9 +239,8 @@ func (m *Manager) expireQueued() {
 				m.releasePendingLocked(r)
 				continue
 			}
-			if next.IsZero() || r.deadline.Before(next) {
-				next = r.deadline
-			}
+			next = r.deadline
+			break
 		}
 		m.mu.Unlock()
 		if next.IsZero() {

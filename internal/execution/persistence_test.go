@@ -116,6 +116,55 @@ func TestPersistentQueuedWorkResumesAfterGracefulShutdown(t *testing.T) {
 	}
 }
 
+func TestPersistentRecoveryRebuildsTenantRoundRobin(t *testing.T) {
+	path := persistentPath(t)
+	config := DefaultConfig()
+	config.Workers = 1
+	anchorStarted := make(chan struct{})
+	started := make(chan string, 4)
+	registry := persistentRegistry(t, func(ctx context.Context, args json.RawMessage) (tool.Outcome, error) {
+		if string(args) == `"anchor"` {
+			close(anchorStarted)
+			<-ctx.Done()
+			return tool.Outcome{}, ctx.Err()
+		}
+		started <- string(args)
+		return tool.Outcome{}, nil
+	})
+	m, err := NewPersistentManager(config, registry, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	submit(t, m, Request{TenantID: "anchor", Tool: "test", Arguments: json.RawMessage(`"anchor"`)})
+	<-anchorStarted
+	var queued []Snapshot
+	for _, item := range []struct{ tenant, value string }{
+		{"A", `"A1"`}, {"A", `"A2"`}, {"B", `"B1"`}, {"B", `"B2"`},
+	} {
+		queued = append(queued, submit(t, m, Request{TenantID: item.tenant, Tool: "test", Arguments: json.RawMessage(item.value)}))
+	}
+	closePersistent(t, m)
+	reopened, err := NewPersistentManager(config, registry, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closePersistent(t, reopened)
+	want := []string{`"A1"`, `"B1"`, `"A2"`, `"B2"`}
+	for i, expected := range want {
+		select {
+		case got := <-started:
+			if got != expected {
+				t.Fatalf("recovered start %d = %q, want %q", i, got, expected)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("recovered task %d did not start", i)
+		}
+	}
+	for _, task := range queued {
+		awaitState(t, reopened, task.ID, Succeeded)
+	}
+}
+
 func TestPersistentRecoveryMarksRunningOutcomeUnknown(t *testing.T) {
 	path := persistentPath(t)
 	store, err := sqlite.Open(path)
