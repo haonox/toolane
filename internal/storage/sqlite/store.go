@@ -6,6 +6,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,14 +30,16 @@ var (
 // opaque to the store so execution-specific fields can evolve independently.
 // Sequence and Version are assigned by the store.
 type Record struct {
-	Sequence      int64
-	Version       int64
-	ID            string
-	TenantID      string
-	State         string
-	QueueDeadline time.Time
-	FinishedAt    *time.Time
-	Payload       []byte
+	Sequence       int64
+	Version        int64
+	ID             string
+	TenantID       string
+	State          string
+	QueueDeadline  time.Time
+	FinishedAt     *time.Time
+	Payload        []byte
+	IdempotencyKey string
+	RequestHash    string
 }
 
 // Store owns one SQLite connection and an OS lock. A second Toolane process
@@ -129,6 +132,15 @@ func validRecord(r Record) error {
 	if r.ID == "" || r.TenantID == "" || r.QueueDeadline.IsZero() || len(r.Payload) == 0 || !json.Valid(r.Payload) {
 		return errors.New("execution record has missing or invalid fields")
 	}
+	if (r.IdempotencyKey == "") != (r.RequestHash == "") {
+		return errors.New("idempotency key and request hash must be supplied together")
+	}
+	if r.RequestHash != "" {
+		decoded, err := hex.DecodeString(r.RequestHash)
+		if err != nil || len(decoded) != 32 {
+			return errors.New("invalid request hash")
+		}
+	}
 	switch r.State {
 	case "queued", "running", "cancelling":
 		if r.FinishedAt != nil {
@@ -154,9 +166,10 @@ func (s *Store) Insert(ctx context.Context, r Record) (Record, error) {
 		return Record{}, errors.New("new execution must not have a sequence or version")
 	}
 	result, err := s.db.ExecContext(ctx, `INSERT INTO executions
-		(id, tenant_id, state, queue_deadline_ns, finished_at_ns, payload, version)
-		VALUES (?, ?, ?, ?, ?, ?, 1)`, r.ID, r.TenantID, r.State,
-		r.QueueDeadline.UnixNano(), nullableTime(r.FinishedAt), r.Payload)
+		(id, tenant_id, state, queue_deadline_ns, finished_at_ns, payload, version, idempotency_key, request_hash)
+		VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`, r.ID, r.TenantID, r.State,
+		r.QueueDeadline.UnixNano(), nullableTime(r.FinishedAt), r.Payload,
+		nullableString(r.IdempotencyKey), nullableString(r.RequestHash))
 	if err != nil {
 		return Record{}, translateWriteError(err)
 	}
@@ -200,7 +213,18 @@ func (s *Store) CompareAndSwap(ctx context.Context, r Record) (Record, error) {
 // Get loads a record, including its opaque payload.
 func (s *Store) Get(ctx context.Context, id string) (Record, error) {
 	r, err := scanRecord(s.db.QueryRowContext(ctx, `SELECT seq, version, id, tenant_id, state,
-		queue_deadline_ns, finished_at_ns, payload FROM executions WHERE id = ?`, id))
+		queue_deadline_ns, finished_at_ns, payload, idempotency_key, request_hash FROM executions WHERE id = ?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Record{}, ErrNotFound
+	}
+	return r, err
+}
+
+// FindByIdempotency returns the original execution for one tenant and key.
+func (s *Store) FindByIdempotency(ctx context.Context, tenantID, key string) (Record, error) {
+	r, err := scanRecord(s.db.QueryRowContext(ctx, `SELECT seq, version, id, tenant_id, state,
+		queue_deadline_ns, finished_at_ns, payload, idempotency_key, request_hash
+		FROM executions WHERE tenant_id = ? AND idempotency_key = ?`, tenantID, key))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Record{}, ErrNotFound
 	}
@@ -211,7 +235,7 @@ func (s *Store) Get(ctx context.Context, id string) (Record, error) {
 // on disk and are fetched by ID instead of being loaded into scheduler memory.
 func (s *Store) ListActive(ctx context.Context) ([]Record, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT seq, version, id, tenant_id, state,
-		queue_deadline_ns, finished_at_ns, payload FROM executions
+		queue_deadline_ns, finished_at_ns, payload, idempotency_key, request_hash FROM executions
 		WHERE state IN ('queued', 'running', 'cancelling') ORDER BY seq`)
 	if err != nil {
 		return nil, err
@@ -228,13 +252,68 @@ func (s *Store) ListActive(ctx context.Context) ([]Record, error) {
 	return records, rows.Err()
 }
 
+// DeleteExpired removes at most limit terminal records whose finish time is
+// at or before cutoff. It returns IDs so the caller can evict memory copies.
+func (s *Store) DeleteExpired(ctx context.Context, cutoff time.Time, limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, errors.New("cleanup limit must be positive")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM executions WHERE finished_at_ns <= ?
+		ORDER BY finished_at_ns, seq LIMIT ?`, cutoff.UnixNano(), limit)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM executions WHERE id = ? AND finished_at_ns <= ?`, id, cutoff.UnixNano()); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// DeleteExpiredID releases one expired execution and its idempotency key.
+// It is used when a retry reaches the key before periodic cleanup does.
+func (s *Store) DeleteExpiredID(ctx context.Context, id string, cutoff time.Time) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM executions WHERE id = ? AND finished_at_ns <= ?`, id, cutoff.UnixNano())
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count > 0, err
+}
+
 type scanner interface{ Scan(...any) error }
 
 func scanRecord(row scanner) (Record, error) {
 	var r Record
 	var deadline int64
 	var finished sql.NullInt64
-	err := row.Scan(&r.Sequence, &r.Version, &r.ID, &r.TenantID, &r.State, &deadline, &finished, &r.Payload)
+	var key, hash sql.NullString
+	err := row.Scan(&r.Sequence, &r.Version, &r.ID, &r.TenantID, &r.State, &deadline, &finished, &r.Payload, &key, &hash)
 	if err != nil {
 		return Record{}, err
 	}
@@ -242,6 +321,12 @@ func scanRecord(row scanner) (Record, error) {
 	if finished.Valid {
 		at := time.Unix(0, finished.Int64).UTC()
 		r.FinishedAt = &at
+	}
+	if key.Valid {
+		r.IdempotencyKey = key.String
+	}
+	if hash.Valid {
+		r.RequestHash = hash.String
 	}
 	if r.Sequence <= 0 || r.Version <= 0 {
 		return Record{}, errors.New("stored execution has invalid sequence or version")
@@ -257,6 +342,13 @@ func nullableTime(at *time.Time) any {
 		return nil
 	}
 	return at.UnixNano()
+}
+
+func nullableString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 func translateWriteError(err error) error {

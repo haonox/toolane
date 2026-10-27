@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 // migrate runs before the store is exposed to the manager. SQLite commits the
 // schema and user_version together, so a failed migration can be retried.
@@ -44,6 +44,19 @@ func migrate(db *sql.DB) error {
 		for _, statement := range statements {
 			if _, err := tx.Exec(statement); err != nil {
 				return fmt.Errorf("migrate SQLite schema: %w", err)
+			}
+		}
+		version = 1
+	}
+	if version == 1 {
+		for _, statement := range []string{
+			`ALTER TABLE executions ADD COLUMN idempotency_key TEXT`,
+			`ALTER TABLE executions ADD COLUMN request_hash TEXT`,
+			`CREATE UNIQUE INDEX executions_tenant_idempotency ON executions(tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL`,
+			`PRAGMA user_version = 2`,
+		} {
+			if _, err := tx.Exec(statement); err != nil {
+				return fmt.Errorf("migrate SQLite schema to version 2: %w", err)
 			}
 		}
 	}

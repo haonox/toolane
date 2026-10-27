@@ -36,11 +36,12 @@ type serverConfig struct {
 // Pointers distinguish omitted settings from explicit zero values, which the
 // execution manager rejects as invalid capacities.
 type serverExecutionConfig struct {
-	Workers            *int `json:"workers,omitempty"`
-	QueueCapacity      *int `json:"queue_capacity,omitempty"`
-	TenantRunningLimit *int `json:"tenant_running_limit,omitempty"`
-	TenantPendingLimit *int `json:"tenant_pending_limit,omitempty"`
-	RetainedResults    *int `json:"retained_results,omitempty"`
+	Workers                *int   `json:"workers,omitempty"`
+	QueueCapacity          *int   `json:"queue_capacity,omitempty"`
+	TenantRunningLimit     *int   `json:"tenant_running_limit,omitempty"`
+	TenantPendingLimit     *int   `json:"tenant_pending_limit,omitempty"`
+	RetainedResults        *int   `json:"retained_results,omitempty"`
+	ResultRetentionSeconds *int64 `json:"result_retention_seconds,omitempty"`
 }
 
 func (c serverConfig) executionConfig() execution.Config {
@@ -62,6 +63,9 @@ func (c serverConfig) executionConfig() execution.Config {
 	}
 	if value := c.Execution.RetainedResults; value != nil {
 		config.RetainedResults = *value
+	}
+	if value := c.Execution.ResultRetentionSeconds; value != nil {
+		config.ResultRetention = time.Duration(*value) * time.Second
 	}
 	return config
 }
@@ -112,6 +116,12 @@ func loadServerConfig(path string) (serverConfig, error) {
 	}
 	if err := decoder.Decode(new(any)); err != io.EOF {
 		return serverConfig{}, errors.New("server config must contain one JSON object")
+	}
+	if config.Execution != nil && config.Execution.ResultRetentionSeconds != nil {
+		seconds := *config.Execution.ResultRetentionSeconds
+		if seconds < 1 || seconds > 365*24*60*60 {
+			return serverConfig{}, errors.New("result_retention_seconds must be between 1 and 31536000")
+		}
 	}
 	if config.BusinessListen == "" {
 		config.BusinessListen = "127.0.0.1:8080"
