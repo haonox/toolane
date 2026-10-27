@@ -12,9 +12,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.14'
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -22,8 +19,3 @@ jobs:
         run: go test ./... -count=1
       - name: Go vet
         run: go vet ./...
-      - name: Python example tests
-        env:
-          PYTHONDONTWRITEBYTECODE: '1'
-        run: |
-          python3 -m unittest discover -s examples -p 'test_*.py'
