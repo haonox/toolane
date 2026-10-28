@@ -137,8 +137,8 @@ func loadServerConfig(path string) (serverConfig, error) {
 		return serverConfig{}, errors.New("database_path must be absolute")
 	}
 	host, port, err := net.SplitHostPort(config.BusinessListen)
-	if err != nil || host != "localhost" && (net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback()) {
-		return serverConfig{}, errors.New("business listen address must use localhost or a loopback IP and a port")
+	if err != nil || !validBusinessListenHost(host) {
+		return serverConfig{}, errors.New("business listen address must use localhost, a loopback IP, or a private IP and a port")
 	}
 	portNumber, err := strconv.Atoi(port)
 	if err != nil || portNumber < 0 || portNumber > 65535 {
@@ -176,6 +176,14 @@ func loadServerConfig(path string) (serverConfig, error) {
 		}
 	}
 	return config, nil
+}
+
+func validBusinessListenHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsLoopback() || ip.IsPrivate())
 }
 
 // runServer assembles the local service.
