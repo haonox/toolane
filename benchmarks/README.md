@@ -58,6 +58,6 @@ python3 benchmarks/run.py
 | `submit_latency`、`end_to_end_latency` | 客户端提交延迟与完整调用延迟，含轮询间隔 |
 | `queue_latency`、`execution_time` | 服务端排队时间与运行时间 |
 
-延迟提供 p50、p95、p99，仅统计获得相应时间戳的调用。因此报告结论时必须同时列出请求总数、`429`、超时和错误。服务端与压测端在同一台机器上，会争用 CPU、内存和网络；本机结果体现的是同机完整系统表现。若以后要测独立压测机和云服务器，可直接构建本目录的 `http/` 客户端，传入该环境的 `-base-url`、私有 `-tokens-file`、`-workload-file`、`-requests` 和 `-concurrency`。Toolane 仅监听回环地址，跨机器访问需要部署入口代理。
+延迟提供 p50、p95、p99，仅统计获得相应时间戳的调用。因此报告结论时必须同时列出请求总数、`429`、超时和错误。`run.py` 在同一台机器上启动服务端与压测端，两者会争用 CPU、内存和网络；本机结果体现的是同机完整系统表现。双机测试时，在 Toolane 配置中把 `business_listen` 设为服务端实际拥有的私网 IP 和端口，安全组只允许压测机访问该端口；`metrics_listen` 继续监听回环地址。在压测机上单独构建并运行本目录的 `http/` 客户端，将 `-base-url` 指向服务端私网地址，并提供私有的 `-tokens-file`、`-workload-file`、`-requests` 和 `-concurrency`。当前 `run.py` 仍用于单机矩阵，双机测试需分别启动服务端和客户端。
 
 普通阶段采用闭环模式，最后的 `open-arrival-150pct` 使用固定到达率。`attempted_per_second` 按整个阶段的实际 HTTP 提交量计算，包含最后等待在途调用完成的时间；固定到达率请看 `arrival_rate_per_second`，并同时检查 `arrival_lag` 与 `client_capacity_drops`。若日后得到真实工具的耗时、输入输出大小或租户活跃度分布，应据此调整 `workload.json` 与 `stages.json` 后再报告容量结论。

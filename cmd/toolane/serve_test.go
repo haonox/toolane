@@ -21,7 +21,7 @@ import (
 	"github.com/haonox/toolane/internal/httpapi"
 )
 
-func TestLoadServerConfigRequiresPrivateLoopbackConfiguration(t *testing.T) {
+func TestLoadServerConfigAllowsPrivateBusinessAddress(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "server.json")
 	valid := `{"business_listen":"127.0.0.1:0","tokens":[{"token":"a-long-private-token-123","tenant_id":"local","tools":["mock.delay"]}]}`
@@ -33,9 +33,24 @@ func TestLoadServerConfigRequiresPrivateLoopbackConfiguration(t *testing.T) {
 		config.DatabasePath != filepath.Join(dir, "toolane-state", "executions.sqlite") {
 		t.Fatalf("valid config: %+v err=%v", config, err)
 	}
+	for _, address := range []string{"localhost:0", "10.0.0.5:0", "172.16.0.5:0", "192.168.1.20:0", "[fd00::5]:0", "[::1]:0"} {
+		raw := strings.Replace(valid, "127.0.0.1:0", address, 1)
+		if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := loadServerConfig(path)
+		if err != nil || got.BusinessListen != address {
+			t.Fatalf("business address %q: %+v, %v", address, got, err)
+		}
+	}
 	for _, raw := range []string{
 		strings.Replace(valid, "127.0.0.1:0", "0.0.0.0:8080", 1),
+		strings.Replace(valid, "127.0.0.1:0", "[::]:8080", 1),
+		strings.Replace(valid, "127.0.0.1:0", "8.8.8.8:8080", 1),
+		strings.Replace(valid, "127.0.0.1:0", "example.com:8080", 1),
+		strings.Replace(valid, "127.0.0.1:0", "[2001:db8::1]:8080", 1),
 		strings.Replace(valid, `"tokens":`, `"metrics_listen":"0.0.0.0:9090","tokens":`, 1),
+		strings.Replace(valid, `"tokens":`, `"metrics_listen":"10.0.0.5:9090","tokens":`, 1),
 		strings.Replace(valid, "mock.delay", "process.printf", 1),
 		strings.Replace(valid, "business_listen", "listen", 1),
 		valid + `{}`,
