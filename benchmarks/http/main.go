@@ -42,6 +42,7 @@ type scenario struct {
 	ExpectedStatus    string          `json:"expected_status,omitempty"`
 	ExpectedErrorCode string          `json:"expected_error_code,omitempty"`
 	ExpectedResult    json.RawMessage `json:"expected_result,omitempty"`
+	ResultValidation  string          `json:"result_validation,omitempty"`
 }
 
 type workload struct {
@@ -440,6 +441,10 @@ func readWorkload(path string) (workload, error) {
 				return workload{}, errors.New("scenario expected_result must be a JSON object")
 			}
 		}
+		if (s.ResultValidation != "" && s.ResultValidation != "identity" && s.ResultValidation != "expected_fields") ||
+			(s.ResultValidation == "expected_fields" && len(s.ExpectedResult) == 0) {
+			return workload{}, errors.New("result_validation must be identity or expected_fields; expected_fields requires expected_result")
+		}
 		names[s.Name] = true
 		total += s.Weight
 	}
@@ -605,7 +610,7 @@ func validateTerminal(snapshot execution, scenario scenario, executionID string)
 	}
 	var actual map[string]any
 	if json.Unmarshal(snapshot.Result, &actual) != nil || actual == nil ||
-		actual["kind"] != scenario.Tool || actual["execution_id"] != executionID {
+		(scenario.ResultValidation != "expected_fields" && (actual["kind"] != scenario.Tool || actual["execution_id"] != executionID)) {
 		return "invalid_tool_result"
 	}
 	if len(scenario.ExpectedResult) > 0 {

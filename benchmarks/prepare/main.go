@@ -87,8 +87,8 @@ func prepare(root string, diagnostics bool, python string) (preparation, error) 
 		return preparation{}, err
 	}
 	var count int
-	if err := json.Unmarshal(profile["tenant_count"], &count); err != nil || count < 1 || count > 5000 {
-		return preparation{}, errors.New("tenant_count must be between 1 and 5000")
+	if err := json.Unmarshal(profile["tenant_count"], &count); err != nil || count < 1 || count > 10000 {
+		return preparation{}, errors.New("tenant_count must be between 1 and 10000")
 	}
 	var tools []object
 	if err := json.Unmarshal(profile["process_tools"], &tools); err != nil || len(tools) == 0 {

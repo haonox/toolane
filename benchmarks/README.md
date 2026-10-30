@@ -4,6 +4,8 @@
 
 压测场景、判定标准与结果适用范围见 [引擎压测方案](PLAN.md)。
 
+10,000 租户、SQLite `NORMAL`、双机链路的容量探索见 [2026-10-30 测试结果](RESULTS-2026-10-30-capacity-10k.md)。
+
 ## 目录
 
 | 路径 | 用途 |
@@ -14,6 +16,7 @@
 | `config/stages.json` | 固定基线、并发阶梯、每租户 100 次调用、热点租户及固定到达率阶段 |
 | `config/diagnostic-tools.json` | 可选的 no-op、本地 SQLite I/O 和故障工具定义 |
 | `config/stages-diagnostics.json`、`config/workload-{noop,io,fault}.json` | 诊断工具的独立阶段与预期结果 |
+| `config/workload-mock-zero.json` | 内置零等待工具诊断负载，用于估计不启动外部进程时的 HTTP、SQLite 与调度上限 |
 | `tools/` | 默认四个和可选三个独立 Python 工具程序；正常完成的工具在标准输出写一个 JSON 值 |
 | `prepare/` | Go 配置生成器：生成绝对工具路径和随机租户 Token，写入私有运行配置 |
 | `http/` | HTTP 压测客户端和结果统计 |
@@ -30,6 +33,8 @@ go run ./benchmarks/prepare --diagnostics
 `--diagnostics` 只准备配置，不会启动服务或发压。它会在私有服务配置中额外注册三个工具，并生成权限为 `600` 的本地 SQLite 只读查询样本。`bench.noop` 只输出最小合法 JSON，用于观察 HTTP、持久化、调度和 Python 进程启动的合计成本；`bench.io` 每次打开样本数据库并读取 8/64/256 行，每行 1024 字节，返回读取字节数和摘要；`bench.fault` 分别生成正常结果、非零退出、运行超时和输出超限。SQLite 查询通常会受操作系统页缓存影响，因此 `bench.io` 测的是实际 SQLite 读取路径，不等于物理磁盘随机读或远端网络访问。诊断矩阵结果应与默认四工具矩阵分开比较。
 
 诊断负载使用可选的 `expected_status`、`expected_error_code`、`expected_result` 指定预期终态和结果字段。客户端会把匹配预期的失败计入 `expected_outcomes`，只有不匹配的终态/错误码/结果进入 `errors`；`final_status` 仍保留实际成功、失败和超时数量。结果 JSON 还包含总体及各场景中带结果调用的 `result_size` 字节分位数。故障阶段的 `succeeded_per_second` 只统计真正成功的调用，不能当作故障场景的总处理速率。
+
+内置 `mock.delay` 返回固定的 `value`，不包含 Process 工具返回的 `kind` 和 `execution_id`。使用 `workload-mock-zero.json` 时，客户端通过 `result_validation: "expected_fields"` 检查 `expected_result` 中声明的字段；其他负载默认仍校验工具名称和执行 ID。这个零等待负载用于隔离引擎开销，不代表真实工具吞吐，也不能单独验证结果是否错配到其他执行 ID。
 
 ## 手动准备与发压
 
@@ -53,7 +58,7 @@ CGO_ENABLED=1 go build -tags 'netgo sqlite_omit_load_extension' -ldflags '-linkm
 
 `profile.json` 设置 48 个 Worker、4096 个全局排队位置、1000 个租户和 50000 条保留结果。它是加压起点，不代表硬件的理论最大值。默认矩阵计划 198000 次调用；其中 `tenant-volume-100k` 阶段由每个租户提交恰好 100 次工具调用，总计 100000 次。固定参数的 `baseline-fixed` 与混合参数的 `ramp-512` 相邻，均为 512 并发、8000 次调用，便于比较负载组成的影响。`tenant-skew-80-10` 假设 10% 的租户承担约 80% 的调用，用来观察热点租户对其他租户的影响。`open-arrival-150pct` 应根据此前 `ramp-512` 阶段的成功完成速率，按其 1.5 倍指定客户端 `-arrival-rate`。各阶段需按 `config/stages.json` 手动运行并保存结果；出现非预期错误或客户端容量丢弃时，应停止后续阶段并保留现场数据。
 
-调整服务容量与租户数量请修改 `config/profile.json`，然后重新运行 `prepare`。调整工具比例和参数请修改 `config/workload.json`；调整压力量级请修改 `config/stages.json`。普通阶段的 `concurrency` 是压测端同时进行的完整调用数：一次调用结束后，空出的并发位置才会提交下一次。固定到达率阶段按独立于完成速度的速率安排调用，`concurrency` 则是压测端允许的最大在途调用数。若在途数达到上限，请求记为 `client_capacity_drops`，没有提交给 Toolane；这种阶段不能用于判断服务端容量，应增大压测端并发上限或降低到达率后重测。引擎按租户调度工具调用，不配置 Agent 数；本压测也不发送可选的 `agent_id`。请同时查看 p99、完成吞吐量、HTTP `429`、工具失败、排队时间和指标快照，不能只看成功吞吐量。
+调整服务容量与租户数量请修改 `config/profile.json`，然后重新运行 `prepare`。租户数上限为 10000；大规模测试应复制配置到独立目录，避免覆盖默认 1000 租户基线。调整工具比例和参数请修改 `config/workload.json`；调整压力量级请修改 `config/stages.json`。普通阶段的 `concurrency` 是压测端同时进行的完整调用数：一次调用结束后，空出的并发位置才会提交下一次。固定到达率阶段按独立于完成速度的速率安排调用，`concurrency` 则是压测端允许的最大在途调用数。若在途数达到上限，请求记为 `client_capacity_drops`，没有提交给 Toolane；这种阶段不能用于判断服务端容量，应增大压测端并发上限或降低到达率后重测。引擎按租户调度工具调用，不配置 Agent 数；本压测也不发送可选的 `agent_id`。请同时查看 p99、完成吞吐量、HTTP `429`、工具失败、排队时间和指标快照，不能只看成功吞吐量。
 
 这里把一个独立 Token 对应的调度主体称为一个租户。真实系统中，一个租户也可能是企业客户，而该企业的许多终端用户共享同一租户；因此压测中的 1000 租户不能直接表述成 1000 个真实终端用户。普通阶段按租户顺序均匀提交；热点阶段使用固定伪随机分布，前 10% 为热点租户，其余为低频租户。`tenant-volume-100k` 会持续运行数分钟，并产生大量服务日志；运行前请确认磁盘剩余空间。
 
