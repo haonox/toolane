@@ -24,7 +24,7 @@ go test -race ./...
 | `internal/tool/` | 工具注册、策略和 JSON 参数校验 |
 | `internal/executor/process/` | 可信进程注册、输出及退出码、超时、取消、子进程清理和资源释放 |
 | `internal/execution/` | 队列容量、Worker 上限、租户轮询与公平性、超时及取消竞争、结果限制 |
-| `internal/storage/sqlite/` | 记录读写、状态条件更新、迁移、数据库独占、权限和到期清理 |
+| `internal/storage/sqlite/` | 记录读写、状态条件更新、迁移、数据库独占、权限、同步策略、重新打开后的读取和到期清理 |
 | `internal/execution/persistence_test.go` | 重启恢复、终态结果保留、幂等提交、存储故障后的准入行为 |
 | `internal/httpapi/` | Token 授权、租户隔离、请求校验、幂等冲突及日志字段 |
 | `cmd/toolane/` | 配置校验、HTTP 服务启停、已注册 Process 工具的端到端调用 |
