@@ -1,0 +1,7 @@
+{
+  "scenarios": [
+    {"name": "io-small", "tool": "bench.io", "weight": 6, "arguments": {"rows": 8}, "expected_result": {"rows": 8, "read_bytes": 8192}},
+    {"name": "io-medium", "tool": "bench.io", "weight": 3, "arguments": {"rows": 64}, "expected_result": {"rows": 64, "read_bytes": 65536}},
+    {"name": "io-large", "tool": "bench.io", "weight": 1, "arguments": {"rows": 256}, "expected_result": {"rows": 256, "read_bytes": 262144}}
+  ]
+}

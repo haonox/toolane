@@ -2,6 +2,8 @@
 
 本目录包含自己的服务配置、租户 Token、四个 Process 工具、混合业务负载、加压阶段和压测程序。压测从业务 HTTP 接口提交调用，轮询执行 ID，校验终态结果；每次调用都经过认证、准入、排队、租户调度、Worker 和真实工具进程。仅需本项目的 Go 引擎源码、Go 与 Python 3 运行环境。
 
+压测场景、判定标准与结果适用范围见 [引擎压测方案](PLAN.md)。
+
 ## 目录
 
 | 路径 | 用途 |
@@ -10,11 +12,25 @@
 | `config/workload.json` | 默认混合负载；四类工具各有不同运行时长、输入或结果大小档位 |
 | `config/workload-baseline.json` | 原固定参数负载，用于观察稳定基线 |
 | `config/stages.json` | 固定基线、并发阶梯、每租户 100 次调用、热点租户及固定到达率阶段 |
-| `tools/` | 四个独立的 Python 工具程序，只接收参数并在标准输出写一个 JSON 值 |
+| `config/diagnostic-tools.json` | 可选的 no-op、本地 SQLite I/O 和故障工具定义 |
+| `config/stages-diagnostics.json`、`config/workload-{noop,io,fault}.json` | 诊断工具的独立阶段与预期结果 |
+| `tools/` | 默认四个和可选三个独立 Python 工具程序；正常完成的工具在标准输出写一个 JSON 值 |
 | `prepare.py` | 生成绝对工具路径和随机租户 Token，写入私有运行配置 |
 | `http/` | HTTP 压测客户端和结果统计 |
 | `run.py` | 编译、启动服务、执行各阶段、保存指标、停止服务 |
 | `generated/` | 私有配置、二进制、日志及结果，整个目录不纳入 Git |
+
+## 可选诊断工具
+
+默认矩阵仍只注册原来的四个工具，原有工具参数和负载比例保持不变。要在本机运行独立诊断矩阵：
+
+```bash
+python3 benchmarks/run.py --diagnostics --stages-file benchmarks/config/stages-diagnostics.json
+```
+
+`--diagnostics` 会在私有服务配置中额外注册三个工具，并生成权限为 `600` 的本地 SQLite 只读查询样本。`bench.noop` 只输出最小合法 JSON，用于观察 HTTP、持久化、调度和 Python 进程启动的合计成本；`bench.io` 每次打开样本数据库并读取 8/64/256 行，每行 1024 字节，返回读取字节数和摘要；`bench.fault` 分别生成正常结果、非零退出、运行超时和输出超限。SQLite 查询通常会受操作系统页缓存影响，因此 `bench.io` 测的是实际 SQLite 读取路径，不等于物理磁盘随机读或远端网络访问。诊断矩阵结果应与默认四工具矩阵分开比较。
+
+诊断负载使用可选的 `expected_status`、`expected_error_code`、`expected_result` 指定预期终态和结果字段。客户端会把匹配预期的失败计入 `expected_outcomes`，只有不匹配的终态/错误码/结果进入 `errors`；`final_status` 仍保留实际成功、失败和超时数量。结果 JSON 还包含总体及各场景中带结果调用的 `result_size` 字节分位数。故障阶段的 `succeeded_per_second` 只统计真正成功的调用，不能当作故障场景的总处理速率。
 
 ## 本机压测
 
@@ -55,6 +71,7 @@ python3 benchmarks/run.py
 | `per_tenant`、`per_tool` | 各租户及各工具的提交、接收、拒绝和完成数量 |
 | `per_scenario`、`per_tenant_group` | 各参数档位及热点/低频租户组的数量、排队与执行延迟 |
 | `arrival_rate_per_second`、`arrival_lag`、`client_capacity_drops` | 固定到达率阶段的计划速率、客户端调度延迟与未发出的调用 |
+| `expected_outcomes`、`result_size` | 与场景预期相符的终态数量、带结果调用的 JSON 字节分位数 |
 | `submit_latency`、`end_to_end_latency` | 客户端提交延迟与完整调用延迟，含轮询间隔 |
 | `queue_latency`、`execution_time` | 服务端排队时间与运行时间 |
 

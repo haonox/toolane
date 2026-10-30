@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -34,10 +35,13 @@ type tokenFile struct {
 }
 
 type scenario struct {
-	Name      string          `json:"name"`
-	Tool      string          `json:"tool"`
-	Weight    int             `json:"weight"`
-	Arguments json.RawMessage `json:"arguments"`
+	Name              string          `json:"name"`
+	Tool              string          `json:"tool"`
+	Weight            int             `json:"weight"`
+	Arguments         json.RawMessage `json:"arguments"`
+	ExpectedStatus    string          `json:"expected_status,omitempty"`
+	ExpectedErrorCode string          `json:"expected_error_code,omitempty"`
+	ExpectedResult    json.RawMessage `json:"expected_result,omitempty"`
 }
 
 type workload struct {
@@ -70,12 +74,19 @@ type sample struct {
 	Execution   time.Duration
 	Polls       int
 	HasResult   bool
+	ResultBytes int
 }
 
 type percentile struct {
 	P50 float64 `json:"p50_ms"`
 	P95 float64 `json:"p95_ms"`
 	P99 float64 `json:"p99_ms"`
+}
+
+type sizePercentile struct {
+	P50 int `json:"p50_bytes"`
+	P95 int `json:"p95_bytes"`
+	P99 int `json:"p99_bytes"`
 }
 
 type tenantCounts struct {
@@ -88,45 +99,49 @@ type tenantCounts struct {
 }
 
 type breakdownSummary struct {
-	Counts          tenantCounts `json:"counts"`
-	EndToEndLatency percentile   `json:"end_to_end_latency"`
-	QueueLatency    percentile   `json:"queue_latency"`
-	ExecutionTime   percentile   `json:"execution_time"`
+	Counts          tenantCounts   `json:"counts"`
+	EndToEndLatency percentile     `json:"end_to_end_latency"`
+	QueueLatency    percentile     `json:"queue_latency"`
+	ExecutionTime   percentile     `json:"execution_time"`
+	ResultSize      sizePercentile `json:"result_size"`
 }
 
 type scenarioTimings struct {
-	endToEnd  []time.Duration
-	queue     []time.Duration
-	execution []time.Duration
+	endToEnd   []time.Duration
+	queue      []time.Duration
+	execution  []time.Duration
+	resultSize []int
 }
 
 type summary struct {
-	StartedAt       time.Time                   `json:"started_at"`
-	DurationSeconds float64                     `json:"duration_seconds"`
-	BaseURL         string                      `json:"base_url"`
-	Tool            string                      `json:"tool"`
-	Requests        int                         `json:"requests"`
-	Concurrency     int                         `json:"concurrency"`
-	ArrivalRate     float64                     `json:"arrival_rate_per_second"`
-	HotTenantPct    int                         `json:"hot_tenant_percent"`
-	HotCallPct      int                         `json:"hot_call_percent"`
-	ClientDropped   int                         `json:"client_capacity_drops"`
-	AttemptedPerSec float64                     `json:"attempted_per_second"`
-	SucceededPerSec float64                     `json:"succeeded_per_second"`
-	Admission       map[string]int              `json:"admission_http_status"`
-	FinalStatus     map[string]int              `json:"final_status"`
-	ResultsPresent  int                         `json:"results_present"`
-	Errors          map[string]int              `json:"errors"`
-	PerTenant       map[string]tenantCounts     `json:"per_tenant"`
-	PerTenantGroup  map[string]breakdownSummary `json:"per_tenant_group"`
-	PerTool         map[string]tenantCounts     `json:"per_tool"`
-	PerScenario     map[string]breakdownSummary `json:"per_scenario"`
-	SubmitLatency   percentile                  `json:"submit_latency"`
-	EndToEndLatency percentile                  `json:"end_to_end_latency"`
-	QueueLatency    percentile                  `json:"queue_latency"`
-	ExecutionTime   percentile                  `json:"execution_time"`
-	ArrivalLag      percentile                  `json:"arrival_lag"`
-	TotalPolls      int                         `json:"total_polls"`
+	StartedAt        time.Time                   `json:"started_at"`
+	DurationSeconds  float64                     `json:"duration_seconds"`
+	BaseURL          string                      `json:"base_url"`
+	Tool             string                      `json:"tool"`
+	Requests         int                         `json:"requests"`
+	Concurrency      int                         `json:"concurrency"`
+	ArrivalRate      float64                     `json:"arrival_rate_per_second"`
+	HotTenantPct     int                         `json:"hot_tenant_percent"`
+	HotCallPct       int                         `json:"hot_call_percent"`
+	ClientDropped    int                         `json:"client_capacity_drops"`
+	AttemptedPerSec  float64                     `json:"attempted_per_second"`
+	SucceededPerSec  float64                     `json:"succeeded_per_second"`
+	Admission        map[string]int              `json:"admission_http_status"`
+	FinalStatus      map[string]int              `json:"final_status"`
+	ResultsPresent   int                         `json:"results_present"`
+	ExpectedOutcomes int                         `json:"expected_outcomes"`
+	Errors           map[string]int              `json:"errors"`
+	PerTenant        map[string]tenantCounts     `json:"per_tenant"`
+	PerTenantGroup   map[string]breakdownSummary `json:"per_tenant_group"`
+	PerTool          map[string]tenantCounts     `json:"per_tool"`
+	PerScenario      map[string]breakdownSummary `json:"per_scenario"`
+	SubmitLatency    percentile                  `json:"submit_latency"`
+	EndToEndLatency  percentile                  `json:"end_to_end_latency"`
+	QueueLatency     percentile                  `json:"queue_latency"`
+	ExecutionTime    percentile                  `json:"execution_time"`
+	ResultSize       sizePercentile              `json:"result_size"`
+	ArrivalLag       percentile                  `json:"arrival_lag"`
+	TotalPolls       int                         `json:"total_polls"`
 }
 
 type options struct {
@@ -190,6 +205,7 @@ func main() {
 	stats := newSummary(started, opt.baseURL, "weighted_mix", requests, concurrency)
 	stats.ArrivalRate, stats.HotTenantPct, stats.HotCallPct = arrivalRate, hotTenantPct, hotCallPct
 	var submitTimes, endToEndTimes, queueTimes, executionTimes, arrivalLags []time.Duration
+	var resultSizes []int
 	scenarioTimes := make(map[string]*scenarioTimings)
 	groupTimes := make(map[string]*scenarioTimings)
 	for result := range results {
@@ -222,6 +238,10 @@ func main() {
 			timings.execution = append(timings.execution, result.Execution)
 			groupTiming.execution = append(groupTiming.execution, result.Execution)
 		}
+		if result.HasResult {
+			resultSizes = append(resultSizes, result.ResultBytes)
+			timings.resultSize = append(timings.resultSize, result.ResultBytes)
+		}
 		if arrivalRate > 0 {
 			arrivalLags = append(arrivalLags, result.ArrivalLag)
 		}
@@ -235,12 +255,14 @@ func main() {
 	stats.EndToEndLatency = percentiles(endToEndTimes)
 	stats.QueueLatency = percentiles(queueTimes)
 	stats.ExecutionTime = percentiles(executionTimes)
+	stats.ResultSize = sizePercentiles(resultSizes)
 	stats.ArrivalLag = percentiles(arrivalLags)
 	for name, timings := range scenarioTimes {
 		item := stats.PerScenario[name]
 		item.EndToEndLatency = percentiles(timings.endToEnd)
 		item.QueueLatency = percentiles(timings.queue)
 		item.ExecutionTime = percentiles(timings.execution)
+		item.ResultSize = sizePercentiles(timings.resultSize)
 		stats.PerScenario[name] = item
 	}
 	for name, timings := range groupTimes {
@@ -403,6 +425,21 @@ func readWorkload(path string) (workload, error) {
 		if strings.TrimSpace(s.Name) == "" || names[s.Name] || s.Tool == "" || s.Weight <= 0 || s.Weight > 10000 || json.Unmarshal(s.Arguments, &args) != nil || args == nil {
 			return workload{}, errors.New("each scenario needs a unique name, tool, positive weight and JSON object arguments")
 		}
+		status := s.ExpectedStatus
+		if status == "" {
+			status = "succeeded"
+		}
+		if status != "succeeded" && status != "failed" && status != "timed_out" ||
+			(status == "succeeded") != (s.ExpectedErrorCode == "") ||
+			(status != "succeeded" && len(s.ExpectedResult) > 0) {
+			return workload{}, errors.New("scenario expected status, error code and result are inconsistent")
+		}
+		if len(s.ExpectedResult) > 0 {
+			var expected map[string]json.RawMessage
+			if json.Unmarshal(s.ExpectedResult, &expected) != nil || expected == nil {
+				return workload{}, errors.New("scenario expected_result must be a JSON object")
+			}
+		}
 		names[s.Name] = true
 		total += s.Weight
 	}
@@ -525,6 +562,7 @@ func run(ctx context.Context, opt options, tenant tenant, scenario scenario) sam
 		case "succeeded", "failed", "timed_out", "cancelled":
 			result.Status = snapshot.Status
 			result.HasResult = len(snapshot.Result) > 0
+			result.ResultBytes = len(snapshot.Result)
 			result.EndToEnd = time.Since(start)
 			if snapshot.RunningAt != nil {
 				result.Queue = snapshot.RunningAt.Sub(snapshot.CreatedAt)
@@ -532,17 +570,7 @@ func run(ctx context.Context, opt options, tenant tenant, scenario scenario) sam
 			if snapshot.RunningAt != nil && snapshot.FinishedAt != nil {
 				result.Execution = snapshot.FinishedAt.Sub(*snapshot.RunningAt)
 			}
-			if snapshot.Status == "succeeded" {
-				var payload struct {
-					Kind        string `json:"kind"`
-					ExecutionID string `json:"execution_id"`
-				}
-				if json.Unmarshal(snapshot.Result, &payload) != nil || payload.Kind != scenario.Tool || payload.ExecutionID != accepted.ID {
-					result.Error = "invalid_tool_result"
-				}
-			} else {
-				result.Error = snapshot.ErrorCode
-			}
+			result.Error = validateTerminal(snapshot, scenario, accepted.ID)
 			return result
 		case "queued", "running", "cancelling":
 		default:
@@ -559,6 +587,39 @@ func run(ctx context.Context, opt options, tenant tenant, scenario scenario) sam
 			return result
 		}
 	}
+}
+
+func validateTerminal(snapshot execution, scenario scenario, executionID string) string {
+	wantStatus := scenario.ExpectedStatus
+	if wantStatus == "" {
+		wantStatus = "succeeded"
+	}
+	if snapshot.Status != wantStatus {
+		return "unexpected_final_status"
+	}
+	if wantStatus != "succeeded" {
+		if snapshot.ErrorCode != scenario.ExpectedErrorCode {
+			return "unexpected_error_code"
+		}
+		return ""
+	}
+	var actual map[string]any
+	if json.Unmarshal(snapshot.Result, &actual) != nil || actual == nil ||
+		actual["kind"] != scenario.Tool || actual["execution_id"] != executionID {
+		return "invalid_tool_result"
+	}
+	if len(scenario.ExpectedResult) > 0 {
+		var expected map[string]any
+		if json.Unmarshal(scenario.ExpectedResult, &expected) != nil {
+			return "invalid_expected_result"
+		}
+		for key, value := range expected {
+			if !reflect.DeepEqual(actual[key], value) {
+				return "unexpected_tool_result"
+			}
+		}
+	}
+	return ""
 }
 
 func call(ctx context.Context, client *http.Client, method, endpoint, token string, body []byte) (int, []byte, error) {
@@ -647,6 +708,9 @@ func (s *summary) add(result sample) {
 	if result.HasResult {
 		s.ResultsPresent++
 	}
+	if result.Status != "" && result.Error == "" {
+		s.ExpectedOutcomes++
+	}
 	if result.Error != "" {
 		s.Errors[result.Error]++
 	}
@@ -677,6 +741,15 @@ func percentiles(values []time.Duration) percentile {
 		return float64(values[index]) / float64(time.Millisecond)
 	}
 	return percentile{P50: value(.50), P95: value(.95), P99: value(.99)}
+}
+
+func sizePercentiles(values []int) sizePercentile {
+	if len(values) == 0 {
+		return sizePercentile{}
+	}
+	slices.Sort(values)
+	at := func(p float64) int { return values[int(math.Ceil(p*float64(len(values))))-1] }
+	return sizePercentile{P50: at(.50), P95: at(.95), P99: at(.99)}
 }
 
 func save(path string, body []byte) error {

@@ -1,0 +1,7 @@
+{
+  "stages": [
+    {"name": "noop", "workload": "noop", "concurrency": 16, "requests": 1000},
+    {"name": "io", "workload": "io", "concurrency": 16, "requests": 1000},
+    {"name": "fault", "workload": "fault", "concurrency": 8, "requests": 400}
+  ]
+}

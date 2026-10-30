@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Create a private, runnable Toolane configuration from this directory only."""
 
+import argparse
 import json
 import os
 import secrets
+import sqlite3
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,11 +15,43 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 PROFILE = ROOT / "config" / "profile.json"
 OUTPUT = ROOT / "generated" / "server.json"
+FIXTURE = ROOT / "generated" / "io-fixture.sqlite"
+
+
+def create_io_fixture() -> None:
+    """Create a stable 1 MiB read-only fixture for the optional I/O tool."""
+    if FIXTURE.exists():
+        with sqlite3.connect(f"file:{FIXTURE}?mode=ro", uri=True) as database:
+            count, minimum, maximum = database.execute(
+                "SELECT COUNT(*), MIN(LENGTH(payload)), MAX(LENGTH(payload)) FROM records"
+            ).fetchone()
+        if (count, minimum, maximum) == (1024, 1024, 1024):
+            return
+        raise ValueError(f"invalid diagnostic I/O fixture: {FIXTURE}")
+    descriptor, temporary = tempfile.mkstemp(prefix="io-fixture-", suffix=".sqlite", dir=FIXTURE.parent)
+    os.close(descriptor)
+    try:
+        with sqlite3.connect(temporary) as database:
+            database.execute("CREATE TABLE records (id INTEGER PRIMARY KEY, payload TEXT NOT NULL)")
+            database.executemany(
+                "INSERT INTO records(id, payload) VALUES (?, ?)",
+                ((index, f"{index:08d}" * 128) for index in range(1, 1025)),
+            )
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, FIXTURE)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--diagnostics", action="store_true", help="include optional diagnostic tools")
+    args = parser.parse_args()
     profile = json.loads(PROFILE.read_text(encoding="utf-8"))
     tools = profile.pop("process_tools")
+    if args.diagnostics:
+        tools.extend(json.loads((ROOT / "config" / "diagnostic-tools.json").read_text(encoding="utf-8"))["process_tools"])
     tenant_count = profile.pop("tenant_count")
     if not isinstance(tenant_count, int) or not 1 <= tenant_count <= 5000:
         raise ValueError("tenant_count must be between 1 and 5000")
@@ -44,6 +79,8 @@ def main() -> int:
         })
         config["process_tools"].append(tool)
     OUTPUT.parent.mkdir(mode=0o700, exist_ok=True)
+    if args.diagnostics:
+        create_io_fixture()
     if OUTPUT.exists():
         existing = json.loads(OUTPUT.read_text(encoding="utf-8"))
         existing_without_tokens = {key: value for key, value in existing.items() if key != "tokens"}

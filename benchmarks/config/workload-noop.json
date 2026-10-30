@@ -1,0 +1,5 @@
+{
+  "scenarios": [
+    {"name": "noop", "tool": "bench.noop", "weight": 1, "arguments": {}}
+  ]
+}
