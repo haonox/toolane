@@ -30,6 +30,7 @@ go test -race ./...
 | `cmd/toolane/` | 配置校验、HTTP 服务启停、已注册 Process 工具的端到端调用 |
 | `internal/observability/` | 指标标签和状态转换耗时 |
 | `benchmarks/http/` | 压测客户端的租户分配、热点流量和固定到达率统计 |
+| `benchmarks/prepare/` | 私有配置生成、Token 复用、诊断工具与 SQLite 样本 |
 
 这些测试使用临时文件、测试内启动的进程或 HTTP 服务验证行为；其中 `cmd/toolane/` 的测试会实际启动服务并调用工具。它们检查功能正确性，不给出可承载的租户数或吞吐量结论。
 
@@ -58,10 +59,10 @@ go test ./internal/execution -run '^$' -bench '^BenchmarkTenantClaims$' -benchme
 
 压测从 HTTP 业务接口提交任务，使用租户 Token 认证，持续查询 `execution_id`，直到得到终态并校验结果。每次调用都会经过准入、持久化、租户调度、Worker 和真实 Python 工具进程。四类工具分别模拟文本处理、CPU 哈希、等待和较大结果输出；负载及其权重定义在 `benchmarks/config/workload.json`。
 
-当前没有自动编排完整矩阵的脚本。`benchmarks/prepare.py` 负责生成私有 Token、绝对工具路径和服务配置；服务端与 Go 压测客户端需分别构建、启动，并按 `benchmarks/config/stages.json` 手动执行各阶段。需要 Go、C 编译器和 Python 3。启动前确认业务与指标端口未被占用。
+当前没有自动编排完整矩阵的脚本。`benchmarks/prepare/` 中的 Go 命令负责生成私有 Token、绝对工具路径和服务配置；服务端与 Go 压测客户端需分别构建、启动，并按 `benchmarks/config/stages.json` 手动执行各阶段。构建需要 Go 和 C 编译器，工具运行需要 Python 3。启动前确认业务与指标端口未被占用。
 
 ```bash
-python3 benchmarks/prepare.py
+go run ./benchmarks/prepare
 go build -o benchmarks/generated/toolane ./cmd/toolane
 go build -o benchmarks/generated/load ./benchmarks/http
 ```
