@@ -21,12 +21,14 @@ import (
 	"github.com/haonox/toolane/internal/executor/mock"
 	"github.com/haonox/toolane/internal/httpapi"
 	"github.com/haonox/toolane/internal/observability"
+	"github.com/haonox/toolane/internal/storage/sqlite"
 	"github.com/haonox/toolane/internal/tool"
 )
 
 type serverConfig struct {
 	BusinessListen string                    `json:"business_listen"`
 	DatabasePath   string                    `json:"database_path,omitempty"`
+	DatabaseSync   sqlite.SynchronousMode    `json:"database_synchronous,omitempty"`
 	Tokens         []httpapi.Token           `json:"tokens"`
 	MetricsListen  string                    `json:"metrics_listen,omitempty"`
 	ProcessTools   []serverProcessToolConfig `json:"process_tools,omitempty"`
@@ -136,6 +138,12 @@ func loadServerConfig(path string) (serverConfig, error) {
 	if !filepath.IsAbs(config.DatabasePath) {
 		return serverConfig{}, errors.New("database_path must be absolute")
 	}
+	if config.DatabaseSync == "" {
+		config.DatabaseSync = sqlite.SynchronousFull
+	}
+	if config.DatabaseSync != sqlite.SynchronousFull && config.DatabaseSync != sqlite.SynchronousNormal {
+		return serverConfig{}, errors.New("database_synchronous must be full or normal")
+	}
 	host, port, err := net.SplitHostPort(config.BusinessListen)
 	if err != nil || !validBusinessListenHost(host) {
 		return serverConfig{}, errors.New("business listen address must use localhost, a loopback IP, or a private IP and a port")
@@ -240,7 +248,8 @@ func runServerWithLogger(ctx context.Context, configPath string, logger *slog.Lo
 	if err := os.MkdirAll(filepath.Dir(config.DatabasePath), 0700); err != nil {
 		return fmt.Errorf("create SQLite directory: %w", err)
 	}
-	manager, err := execution.NewPersistentManager(config.executionConfig(), registry, config.DatabasePath,
+	manager, err := execution.NewPersistentManagerWithSynchronousMode(config.executionConfig(), registry,
+		config.DatabasePath, config.DatabaseSync,
 		func(before, after execution.Snapshot) {
 			metrics.RecordChange(observability.Change{BeforeState: string(before.State), AfterState: string(after.State),
 				BeforeCleanup: before.CleanupStatus, AfterCleanup: after.CleanupStatus, CreatedAt: after.CreatedAt,

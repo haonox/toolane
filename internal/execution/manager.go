@@ -182,7 +182,7 @@ type Stats struct {
 // cancellation. A running tool occupies a worker until Execute returns; an
 // executor must stop its work before returning after cancellation.
 type Manager struct {
-	mu                 sync.Mutex
+	mu                 sync.RWMutex
 	transitionObserver func(Snapshot, Snapshot)
 	cond               *sync.Cond
 	config             Config
@@ -214,13 +214,20 @@ func NewManager(config Config, registry *tool.Registry, observers ...func(Snapsh
 // NewPersistentManager opens a durable execution store and recovers accepted
 // work before starting workers. Close releases the database lock.
 func NewPersistentManager(config Config, registry *tool.Registry, databasePath string, observers ...func(Snapshot, Snapshot)) (*Manager, error) {
+	return NewPersistentManagerWithSynchronousMode(config, registry, databasePath, sqlite.SynchronousFull, observers...)
+}
+
+// NewPersistentManagerWithSynchronousMode selects the SQLite WAL sync policy.
+// The default constructor keeps FULL durability.
+func NewPersistentManagerWithSynchronousMode(config Config, registry *tool.Registry, databasePath string,
+	mode sqlite.SynchronousMode, observers ...func(Snapshot, Snapshot)) (*Manager, error) {
 	if err := config.validate(); err != nil {
 		return nil, err
 	}
 	if registry == nil {
 		return nil, errors.New("nil tool registry")
 	}
-	store, err := sqlite.Open(databasePath)
+	store, err := sqlite.OpenWithSynchronousMode(databasePath, mode)
 	if err != nil {
 		return nil, err
 	}
@@ -479,6 +486,18 @@ func newID() (string, error) {
 // Get returns a copy of an execution record, loading an evicted terminal
 // snapshot from SQLite for persistent managers.
 func (m *Manager) Get(id string) (Snapshot, error) {
+	m.mu.RLock()
+	if r, ok := m.records[id]; ok {
+		snapshot := cloneSnapshot(r.snapshot)
+		expired := m.expiredSnapshot(snapshot, time.Now())
+		m.mu.RUnlock()
+		if expired {
+			return Snapshot{}, ErrNotFound
+		}
+		return snapshot, nil
+	}
+	m.mu.RUnlock()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	r, ok := m.records[id]

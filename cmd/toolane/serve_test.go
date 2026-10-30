@@ -30,8 +30,15 @@ func TestLoadServerConfigAllowsPrivateBusinessAddress(t *testing.T) {
 	}
 	config, err := loadServerConfig(path)
 	if err != nil || config.BusinessListen != "127.0.0.1:0" || config.MetricsListen != "127.0.0.1:9090" || len(config.Tokens) != 1 ||
-		config.DatabasePath != filepath.Join(dir, "toolane-state", "executions.sqlite") {
+		config.DatabasePath != filepath.Join(dir, "toolane-state", "executions.sqlite") || config.DatabaseSync != "full" {
 		t.Fatalf("valid config: %+v err=%v", config, err)
+	}
+	normal := strings.Replace(valid, `"tokens":`, `"database_synchronous":"normal","tokens":`, 1)
+	if err := os.WriteFile(path, []byte(normal), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := loadServerConfig(path); err != nil || got.DatabaseSync != "normal" {
+		t.Fatalf("normal synchronous mode: %+v, %v", got, err)
 	}
 	for _, address := range []string{"localhost:0", "10.0.0.5:0", "172.16.0.5:0", "192.168.1.20:0", "[fd00::5]:0", "[::1]:0"} {
 		raw := strings.Replace(valid, "127.0.0.1:0", address, 1)
@@ -56,6 +63,7 @@ func TestLoadServerConfigAllowsPrivateBusinessAddress(t *testing.T) {
 		valid + `{}`,
 		strings.Replace(valid, `"tokens":`, `"unsupported_option":true,"tokens":`, 1),
 		strings.Replace(valid, `"tokens":`, `"database_path":"relative.sqlite","tokens":`, 1),
+		strings.Replace(valid, `"tokens":`, `"database_synchronous":"off","tokens":`, 1),
 	} {
 		if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
 			t.Fatal(err)
