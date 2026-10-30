@@ -152,6 +152,8 @@ curl -sS http://127.0.0.1:8080/api/v1/executions \
 
 ## 代码与验证
 
+当前自动化测试、CI、调度器微基准和 HTTP 压测的运行方式见 [测试说明](TESTING.md)。
+
 | 路径 | 职责 |
 | --- | --- |
 | `cmd/toolane/` | CLI 演示和 HTTP 服务启动 |

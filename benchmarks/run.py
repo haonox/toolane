@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -41,12 +42,13 @@ def metrics(url: str, path: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--quick", action="store_true", help="run one complete tool call per configured tenant")
+    parser.add_argument("--diagnostics", action="store_true", help="include optional diagnostic tools")
     parser.add_argument("--stages-file", type=Path, default=HERE / "config" / "stages.json")
     args = parser.parse_args()
     profile = json.loads((HERE / "config" / "profile.json").read_text(encoding="utf-8"))
     if ready("http://" + profile["business_listen"]):
         raise RuntimeError("benchmark business port is already serving; stop the previous server first")
-    subprocess.run([sys.executable, str(HERE / "prepare.py")], check=True)
+    subprocess.run([sys.executable, str(HERE / "prepare.py"), *(["--diagnostics"] if args.diagnostics else [])], check=True)
     config = json.loads(SERVER.read_text(encoding="utf-8"))
     base_url = "http://" + config["business_listen"]
     metrics_url = "http://" + config["metrics_listen"]
@@ -77,11 +79,21 @@ def main() -> int:
             dirty_result = subprocess.run(["git", "status", "--porcelain"], cwd=REPO, capture_output=True, text=True)
             if dirty_result.returncode == 0:
                 dirty = bool(dirty_result.stdout.strip())
+    workload_names = {stage.get("workload", "mixed") for stage in stages}
+    if any(not re.fullmatch(r"[a-z][a-z0-9-]*", name) for name in workload_names):
+        raise ValueError("workload names must be lowercase letters, digits or hyphens")
+    workload_paths = {name: HERE / "config" / ("workload.json" if name == "mixed" else f"workload-{name}.json")
+                      for name in workload_names}
+    if any(not path.is_file() for path in workload_paths.values()):
+        raise ValueError("a stage references a missing workload file")
+    if not args.diagnostics and any(name in {"noop", "io", "fault"} for name in workload_names):
+        raise ValueError("diagnostic workloads require --diagnostics")
     metadata = {"started_at": datetime.now(timezone.utc).isoformat(), "cpu_count": os.cpu_count(),
                 "profile": profile, "stages": stages, "python": sys.version.split()[0],
                 "git_revision": revision, "git_dirty": dirty,
-                "workloads": {name: json.loads((HERE / "config" / filename).read_text(encoding="utf-8"))
-                              for name, filename in (("mixed", "workload.json"), ("baseline", "workload-baseline.json"))}}
+                "diagnostics": args.diagnostics,
+                "workloads": {name: json.loads(path.read_text(encoding="utf-8"))
+                              for name, path in workload_paths.items()}}
     (run_dir / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     print(f"Results: {run_dir}", flush=True)
     completed_rates = {}
@@ -100,9 +112,7 @@ def main() -> int:
             for stage in stages:
                 name = stage["name"]
                 workload_name = stage.get("workload", "mixed")
-                if workload_name not in ("mixed", "baseline"):
-                    raise ValueError(f"unknown workload for {name}: {workload_name}")
-                workload_path = HERE / "config" / ("workload-baseline.json" if workload_name == "baseline" else "workload.json")
+                workload_path = workload_paths[workload_name]
                 arrival_rate = 0.0
                 if "arrival_reference" in stage:
                     reference = stage["arrival_reference"]
@@ -143,6 +153,7 @@ def main() -> int:
                       f"rejected429={summary['admission_http_status'].get('429', 0)} "
                       f"client_dropped={summary['client_capacity_drops']} "
                       f"succeeded={summary['final_status'].get('succeeded', 0)} "
+                      f"expected={summary['expected_outcomes']} "
                       f"arrival_rate={summary['arrival_rate_per_second']:.1f}/s "
                       f"rate={summary['succeeded_per_second']:.1f}/s "
                       f"p99={summary['end_to_end_latency']['p99_ms']:.1f}ms "

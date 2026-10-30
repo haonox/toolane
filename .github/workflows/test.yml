@@ -19,3 +19,5 @@ jobs:
         run: go test ./... -count=1
       - name: Go vet
         run: go vet ./...
+      - name: Python benchmark tool tests
+        run: python3 -m unittest discover -s benchmarks -p 'test_*.py'

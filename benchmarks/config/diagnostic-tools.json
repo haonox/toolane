@@ -1,0 +1,44 @@
+{
+  "process_tools": [
+    {
+      "name": "bench.noop",
+      "description": "Minimal Process tool for engine overhead measurement.",
+      "script": "tools/noop.py",
+      "parameters": {"type": "object", "properties": {}, "additionalProperties": false},
+      "args": [{"execution_id": true}],
+      "run_timeout_ms": 5000,
+      "max_output_bytes": 8192,
+      "max_result_bytes": 8192
+    },
+    {
+      "name": "bench.io",
+      "description": "Read bounded rows from a local read-only SQLite fixture.",
+      "script": "tools/io.py",
+      "parameters": {
+        "type": "object",
+        "properties": {"rows": {"type": "integer", "minimum": 1, "maximum": 256}},
+        "required": ["rows"],
+        "additionalProperties": false
+      },
+      "args": [{"parameter": "rows"}, {"execution_id": true}],
+      "run_timeout_ms": 5000,
+      "max_output_bytes": 8192,
+      "max_result_bytes": 8192
+    },
+    {
+      "name": "bench.fault",
+      "description": "Generate controlled Process failures, timeouts and output-limit errors.",
+      "script": "tools/fault.py",
+      "parameters": {
+        "type": "object",
+        "properties": {"mode": {"type": "string", "minLength": 1, "maxLength": 16}},
+        "required": ["mode"],
+        "additionalProperties": false
+      },
+      "args": [{"parameter": "mode"}, {"execution_id": true}],
+      "run_timeout_ms": 500,
+      "max_output_bytes": 4096,
+      "max_result_bytes": 4096
+    }
+  ]
+}

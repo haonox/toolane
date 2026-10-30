@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,73 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return f(request)
+}
+
+func TestDiagnosticWorkloadsDeclareAndCheckExpectedOutcomes(t *testing.T) {
+	for _, name := range []string{"noop", "io", "fault"} {
+		work, err := readWorkload(filepath.Join("..", "config", "workload-"+name+".json"))
+		if err != nil {
+			t.Fatalf("read %s workload: %v", name, err)
+		}
+		for _, scenario := range work.Scenarios {
+			status := scenario.ExpectedStatus
+			if status == "" {
+				status = "succeeded"
+			}
+			snapshot := execution{Status: status, ErrorCode: scenario.ExpectedErrorCode,
+				Result: json.RawMessage(`{"kind":"` + scenario.Tool + `","execution_id":"exec-1"}`)}
+			if len(scenario.ExpectedResult) > 0 {
+				var result map[string]any
+				if err := json.Unmarshal(snapshot.Result, &result); err != nil {
+					t.Fatal(err)
+				}
+				var expected map[string]any
+				if err := json.Unmarshal(scenario.ExpectedResult, &expected); err != nil {
+					t.Fatal(err)
+				}
+				for key, value := range expected {
+					result[key] = value
+				}
+				snapshot.Result, err = json.Marshal(result)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := validateTerminal(snapshot, scenario, "exec-1"); got != "" {
+				t.Errorf("%s expected outcome rejected: %s", scenario.Name, got)
+			}
+			if status != "succeeded" {
+				snapshot.ErrorCode = "wrong_error"
+				if got := validateTerminal(snapshot, scenario, "exec-1"); got != "unexpected_error_code" {
+					t.Errorf("%s wrong error code: %s", scenario.Name, got)
+				}
+			} else {
+				if len(scenario.ExpectedResult) > 0 {
+					var result map[string]any
+					if err := json.Unmarshal(snapshot.Result, &result); err != nil {
+						t.Fatal(err)
+					}
+					for key := range result {
+						if key != "kind" && key != "execution_id" {
+							result[key] = "incorrect"
+							break
+						}
+					}
+					snapshot.Result, err = json.Marshal(result)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got := validateTerminal(snapshot, scenario, "exec-1"); got != "unexpected_tool_result" {
+						t.Errorf("%s wrong expected field: %s", scenario.Name, got)
+					}
+				}
+				snapshot.Result = json.RawMessage(`{"kind":"wrong","execution_id":"exec-1"}`)
+				if got := validateTerminal(snapshot, scenario, "exec-1"); got != "invalid_tool_result" {
+					t.Errorf("%s wrong result: %s", scenario.Name, got)
+				}
+			}
+		}
+	}
 }
 
 func TestTenantSelectionKeepsUniformAndSkewedLoadsDistinct(t *testing.T) {

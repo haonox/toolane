@@ -1,0 +1,8 @@
+{
+  "scenarios": [
+    {"name": "fault-ok", "tool": "bench.fault", "weight": 1, "arguments": {"mode": "ok"}, "expected_result": {"mode": "ok"}},
+    {"name": "fault-exit", "tool": "bench.fault", "weight": 1, "arguments": {"mode": "exit"}, "expected_status": "failed", "expected_error_code": "process_exit_nonzero"},
+    {"name": "fault-timeout", "tool": "bench.fault", "weight": 1, "arguments": {"mode": "timeout"}, "expected_status": "timed_out", "expected_error_code": "execution_timeout"},
+    {"name": "fault-output", "tool": "bench.fault", "weight": 1, "arguments": {"mode": "output"}, "expected_status": "failed", "expected_error_code": "output_limit_exceeded"}
+  ]
+}
