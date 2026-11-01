@@ -26,6 +26,16 @@ var (
 	ErrLocked   = errors.New("execution database already open by another process")
 )
 
+// SynchronousMode controls when SQLite syncs the WAL to stable storage.
+// Normal preserves committed transactions across application crashes but may
+// lose the newest commits after an operating-system crash or power failure.
+type SynchronousMode string
+
+const (
+	SynchronousFull   SynchronousMode = "full"
+	SynchronousNormal SynchronousMode = "normal"
+)
+
 // Record is the durable envelope around a serialized execution. Payload is
 // opaque to the store so execution-specific fields can evolve independently.
 // Sequence and Version are assigned by the store.
@@ -54,6 +64,24 @@ type Store struct {
 // Open creates or migrates a database in an existing private directory. The
 // lock is held until Close; a stale lock file after a crash is harmless.
 func Open(path string) (_ *Store, err error) {
+	return OpenWithSynchronousMode(path, SynchronousFull)
+}
+
+// OpenWithSynchronousMode opens a store with an explicit WAL sync policy.
+// An empty mode uses the durable default, FULL.
+func OpenWithSynchronousMode(path string, mode SynchronousMode) (_ *Store, err error) {
+	if mode == "" {
+		mode = SynchronousFull
+	}
+	var synchronousPragma string
+	switch mode {
+	case SynchronousFull:
+		synchronousPragma = "PRAGMA synchronous=FULL"
+	case SynchronousNormal:
+		synchronousPragma = "PRAGMA synchronous=NORMAL"
+	default:
+		return nil, fmt.Errorf("unsupported SQLite synchronous mode %q", mode)
+	}
 	if !filepath.IsAbs(path) || path == "" {
 		return nil, errors.New("SQLite path must be absolute")
 	}
@@ -101,7 +129,7 @@ func Open(path string) (_ *Store, err error) {
 	// connection-wide and prevents an in-process writer convoy.
 	db.SetMaxOpenConns(1)
 	for _, pragma := range []string{
-		"PRAGMA journal_mode=WAL", "PRAGMA synchronous=FULL", "PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000",
+		"PRAGMA journal_mode=WAL", synchronousPragma, "PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000",
 	} {
 		if _, err = db.Exec(pragma); err != nil {
 			return nil, fmt.Errorf("configure SQLite: %w", err)

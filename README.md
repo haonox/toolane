@@ -115,6 +115,8 @@ go run ./cmd/toolane demo process
 
 可选的 `database_path` 必须是绝对路径。未填写时，服务使用配置文件同目录下的 `toolane-state/executions.sqlite`。服务会创建数据库目录并要求它仅对当前用户开放（权限 `0700`）；数据库文件权限为 `0600`。请把该目录放在重启后仍保留的磁盘上；备份前先正常停止服务，再保存该目录。同一数据库一次只允许一个服务实例使用。
 
+可选的 `database_synchronous` 控制 SQLite WAL 的同步策略，只接受 `"full"` 或 `"normal"`，默认 `"full"`。`full` 在每次提交后同步 WAL，优先保证操作系统崩溃或断电后的已确认任务不丢失。若业务只要求服务进程崩溃、重启后恢复，可显式设置 `"database_synchronous": "normal"` 来减少同步写入；此模式下最近已确认的提交可能在操作系统崩溃或断电后回滚，但数据库仍保持一致。该取舍见 [SQLite 官方文档](https://www.sqlite.org/pragma.html#pragma_synchronous)。
+
 ```bash
 chmod 600 /absolute/private/server.json
 go run ./cmd/toolane serve --config /absolute/private/server.json
@@ -148,7 +150,7 @@ curl -sS http://127.0.0.1:8080/api/v1/executions \
 | `POST` | `/api/v1/executions/{id}/cancel` | 取消任务 |
 | `GET` | `/healthz`、`/readyz` | 存活与就绪检查 |
 
-服务始终启动业务和指标两个端口。`business_listen` 默认是 `127.0.0.1:8080`，也可指定服务器实际拥有的私网 IPv4/IPv6 地址，例如 `10.0.0.5:8080` 或 `[fd00::5]:8080`，供同一私网的客户端访问；不接受 `0.0.0.0`、`[::]`、公网 IP 或任意域名。云服务器上的私网监听还应在安全组中仅向可信客户端开放该端口。`metrics_listen` 默认是 `127.0.0.1:9090`，仍只允许本机回环地址。指标端口提供 `GET /metrics`，服务向标准错误输出结构化 JSON 日志。任一端口无法监听时，服务启动失败。
+服务始终启动业务和指标两个端口。`business_listen` 默认是 `127.0.0.1:8080`，也可指定服务器实际拥有的私网 IPv4/IPv6 地址，例如 `10.0.0.5:8080` 或 `[fd00::5]:8080`，供同一私网的客户端访问；不接受 `0.0.0.0`、`[::]`、公网 IP 或任意域名。云服务器上的私网监听还应在安全组中仅向可信客户端开放该端口。`metrics_listen` 默认是 `127.0.0.1:9090`，仍只允许本机回环地址。指标端口提供 `GET /metrics`，服务向标准错误输出结构化 JSON 日志；成功的执行状态轮询记为 Debug，提交、失败查询和状态转换保留 Info，避免高频轮询放大日志写入。任一端口无法监听时，服务启动失败。
 
 ## 代码与验证
 

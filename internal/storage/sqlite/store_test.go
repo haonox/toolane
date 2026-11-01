@@ -40,6 +40,47 @@ func queuedRecord(id string, deadline time.Time) Record {
 		Payload: []byte(`{"tool":"test.echo","arguments":{"value":"private"}}`)}
 }
 
+func TestSynchronousModeAndReopen(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		mode SynchronousMode
+		want int
+	}{
+		{"default", "", 2},
+		{"full", SynchronousFull, 2},
+		{"normal", SynchronousNormal, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(privateDir(t), "executions.sqlite")
+			store, err := OpenWithSynchronousMode(path, test.mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got int
+			if err := store.db.QueryRow("PRAGMA synchronous").Scan(&got); err != nil || got != test.want {
+				t.Fatalf("synchronous = %d, %v; want %d", got, err, test.want)
+			}
+			if _, err := store.Insert(context.Background(), queuedRecord("saved", time.Now().Add(time.Minute))); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := OpenWithSynchronousMode(path, test.mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			if _, err := reopened.Get(context.Background(), "saved"); err != nil {
+				t.Fatalf("record lost after reopening store: %v", err)
+			}
+		})
+	}
+	if _, err := OpenWithSynchronousMode(filepath.Join(privateDir(t), "invalid.sqlite"), "off"); err == nil {
+		t.Fatal("accepted unsupported synchronous mode")
+	}
+}
+
 func TestOpenInsertRecoverAndCompareAndSwap(t *testing.T) {
 	path := filepath.Join(privateDir(t), "executions.sqlite")
 	store := openTestStore(t, path)

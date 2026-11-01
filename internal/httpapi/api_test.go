@@ -201,11 +201,32 @@ func TestStructuredRequestLogsKeepIdentityAndExcludePayload(t *testing.T) {
 		}
 		entries = append(entries, entry)
 	}
-	if len(entries) != 4 || entries[0]["error_code"] != "unauthorized" || entries[0]["tenant_id"] != nil ||
+	if len(entries) != 3 || entries[0]["error_code"] != "unauthorized" || entries[0]["tenant_id"] != nil ||
 		entries[1]["tenant_id"] != "first" || entries[1]["execution_id"] != created.ID ||
-		entries[2]["tenant_id"] != "second" || entries[2]["execution_id"] != nil ||
-		entries[3]["route"] != "GET /api/v1/executions/{id}" {
+		entries[2]["tenant_id"] != "second" || entries[2]["execution_id"] != nil {
 		t.Fatalf("unexpected request log fields: %+v", entries)
+	}
+}
+
+func TestSuccessfulExecutionPollIsAvailableAtDebugLevel(t *testing.T) {
+	api := apiFixture(t)
+	var output bytes.Buffer
+	api.EnableLogger(slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	accepted := request(t, api, "POST", "/api/v1/executions", firstToken,
+		`{"tool":"mock.delay","arguments":{"delay_ms":0}}`, "")
+	if accepted.Code != http.StatusAccepted {
+		t.Fatalf("admission status: %d %s", accepted.Code, accepted.Body.String())
+	}
+	var created executionView
+	if err := json.Unmarshal(accepted.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if got := request(t, api, "GET", "/api/v1/executions/"+created.ID, firstToken, "", ""); got.Code != http.StatusOK {
+		t.Fatalf("poll status: %d %s", got.Code, got.Body.String())
+	}
+	if !strings.Contains(output.String(), `"level":"DEBUG","msg":"http_request"`) ||
+		!strings.Contains(output.String(), `"route":"GET /api/v1/executions/{id}"`) {
+		t.Fatalf("missing debug poll log: %s", output.String())
 	}
 }
 

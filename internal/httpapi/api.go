@@ -221,6 +221,13 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if status == 0 {
 		status = http.StatusOK
 	}
+	level := slog.LevelInfo
+	if r.Method == http.MethodGet && request.Pattern == "GET /api/v1/executions/{id}" && status == http.StatusOK {
+		level = slog.LevelDebug
+		if !a.logger.Enabled(request.Context(), level) {
+			return
+		}
+	}
 	attrs := []any{"request_id", id, "method", r.Method, "route", request.Pattern,
 		"http_status", status, "duration_ms", time.Since(start).Milliseconds()}
 	if trace.tenantID != "" {
@@ -232,7 +239,7 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if trace.errorCode != "" {
 		attrs = append(attrs, "error_code", trace.errorCode)
 	}
-	a.logger.Info("http_request", attrs...)
+	a.logger.Log(request.Context(), level, "http_request", attrs...)
 }
 
 func (a *API) withPrincipal(next func(http.ResponseWriter, *http.Request, principal)) http.HandlerFunc {
