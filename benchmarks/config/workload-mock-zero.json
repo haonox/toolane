@@ -1,0 +1,12 @@
+{
+  "scenarios": [
+    {
+      "name": "mock-zero",
+      "tool": "mock.delay",
+      "weight": 1,
+      "arguments": {"delay_ms": 0, "value": "ok"},
+      "result_validation": "expected_fields",
+      "expected_result": {"value": "ok"}
+    }
+  ]
+}

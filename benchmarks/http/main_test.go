@@ -86,6 +86,23 @@ func TestDiagnosticWorkloadsDeclareAndCheckExpectedOutcomes(t *testing.T) {
 	}
 }
 
+func TestExpectedFieldsValidationForBuiltInTool(t *testing.T) {
+	work, err := readWorkload(filepath.Join("..", "config", "workload-mock-zero.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenario := work.Scenarios[0]
+	if got := validateTerminal(execution{Status: "succeeded", Result: json.RawMessage(`{"value":"ok"}`)}, scenario, "exec-1"); got != "" {
+		t.Fatalf("valid built-in result: %s", got)
+	}
+	if got := validateTerminal(execution{Status: "succeeded", Result: json.RawMessage(`{"value":"wrong"}`)}, scenario, "exec-1"); got != "unexpected_tool_result" {
+		t.Fatalf("wrong built-in result: %s", got)
+	}
+	if got := validateTerminal(execution{Status: "succeeded", Result: json.RawMessage(`[]`)}, scenario, "exec-1"); got != "invalid_tool_result" {
+		t.Fatalf("non-object result: %s", got)
+	}
+}
+
 func TestTenantSelectionKeepsUniformAndSkewedLoadsDistinct(t *testing.T) {
 	tenants := make([]tenant, 100)
 	for i := range tenants {

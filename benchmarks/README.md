@@ -4,6 +4,8 @@
 
 压测场景、判定标准与结果适用范围见 [引擎压测方案](PLAN.md)；2026-10-30 的双机矩阵与优化结果见 [测试记录](RESULTS-2026-10-30.md)。
 
+10,000 租户、SQLite `NORMAL`、双机链路的容量探索见 [2026-10-30 测试结果](RESULTS-2026-10-30-capacity-10k.md)。
+
 ## 目录
 
 | 路径 | 用途 |
@@ -14,39 +16,51 @@
 | `config/stages.json` | 固定基线、并发阶梯、每租户 100 次调用、热点租户及固定到达率阶段 |
 | `config/diagnostic-tools.json` | 可选的 no-op、本地 SQLite I/O 和故障工具定义 |
 | `config/stages-diagnostics.json`、`config/workload-{noop,io,fault}.json` | 诊断工具的独立阶段与预期结果 |
+| `config/workload-mock-zero.json` | 内置零等待工具诊断负载，用于估计不启动外部进程时的 HTTP、SQLite 与调度上限 |
 | `tools/` | 默认四个和可选三个独立 Python 工具程序；正常完成的工具在标准输出写一个 JSON 值 |
-| `prepare.py` | 生成绝对工具路径和随机租户 Token，写入私有运行配置 |
+| `prepare/` | Go 配置生成器：生成绝对工具路径和随机租户 Token，写入私有运行配置 |
 | `http/` | HTTP 压测客户端和结果统计 |
-| `run.py` | 编译、启动服务、执行各阶段、保存指标、停止服务 |
 | `generated/` | 私有配置、二进制、日志及结果，整个目录不纳入 Git |
 
 ## 可选诊断工具
 
-默认矩阵仍只注册原来的四个工具，原有工具参数和负载比例保持不变。要在本机运行独立诊断矩阵：
+默认配置仍只注册原来的四个工具，原有工具参数和负载比例保持不变。需要诊断工具时，生成包含额外三个工具的私有配置：
 
 ```bash
-python3 benchmarks/run.py --diagnostics --stages-file benchmarks/config/stages-diagnostics.json
+go run ./benchmarks/prepare --diagnostics
 ```
 
-`--diagnostics` 会在私有服务配置中额外注册三个工具，并生成权限为 `600` 的本地 SQLite 只读查询样本。`bench.noop` 只输出最小合法 JSON，用于观察 HTTP、持久化、调度和 Python 进程启动的合计成本；`bench.io` 每次打开样本数据库并读取 8/64/256 行，每行 1024 字节，返回读取字节数和摘要；`bench.fault` 分别生成正常结果、非零退出、运行超时和输出超限。SQLite 查询通常会受操作系统页缓存影响，因此 `bench.io` 测的是实际 SQLite 读取路径，不等于物理磁盘随机读或远端网络访问。诊断矩阵结果应与默认四工具矩阵分开比较。
+`--diagnostics` 只准备配置，不会启动服务或发压。它会在私有服务配置中额外注册三个工具，并生成权限为 `600` 的本地 SQLite 只读查询样本。`bench.noop` 只输出最小合法 JSON，用于观察 HTTP、持久化、调度和 Python 进程启动的合计成本；`bench.io` 每次打开样本数据库并读取 8/64/256 行，每行 1024 字节，返回读取字节数和摘要；`bench.fault` 分别生成正常结果、非零退出、运行超时和输出超限。SQLite 查询通常会受操作系统页缓存影响，因此 `bench.io` 测的是实际 SQLite 读取路径，不等于物理磁盘随机读或远端网络访问。诊断矩阵结果应与默认四工具矩阵分开比较。
 
 诊断负载使用可选的 `expected_status`、`expected_error_code`、`expected_result` 指定预期终态和结果字段。客户端会把匹配预期的失败计入 `expected_outcomes`，只有不匹配的终态/错误码/结果进入 `errors`；`final_status` 仍保留实际成功、失败和超时数量。结果 JSON 还包含总体及各场景中带结果调用的 `result_size` 字节分位数。故障阶段的 `succeeded_per_second` 只统计真正成功的调用，不能当作故障场景的总处理速率。
 
-## 本机压测
+内置 `mock.delay` 返回固定的 `value`，不包含 Process 工具返回的 `kind` 和 `execution_id`。使用 `workload-mock-zero.json` 时，客户端通过 `result_validation: "expected_fields"` 检查 `expected_result` 中声明的字段；其他负载默认仍校验工具名称和执行 ID。这个零等待负载用于隔离引擎开销，不代表真实工具吞吐，也不能单独验证结果是否错配到其他执行 ID。
 
-从项目根目录运行：
+## 手动准备与发压
+
+从项目根目录生成默认四工具配置并构建服务端与客户端：
 
 ```bash
-python3 benchmarks/run.py
+go run ./benchmarks/prepare
+go build -o benchmarks/generated/toolane ./cmd/toolane
+go build -o benchmarks/generated/load ./benchmarks/http
 ```
 
-首次运行会生成 `benchmarks/generated/server.json`，权限为 `600`。配置变化时，旧私有配置会在 `generated/` 中备份，再生成新的随机 Token。每次压测还会在私有结果目录中创建专用的运行配置和 SQLite 数据库，避免上次运行留下的任务影响测量；该目录包含 Token、参数和结果，应按敏感数据保管。脚本使用独立的 `127.0.0.1:18080` 业务端口和 `127.0.0.1:19090` 指标端口，依次执行 `config/stages.json` 中的全部阶段。每轮保存 JSON 结果、指标端口前后快照和服务日志。运行 `python3 benchmarks/run.py --quick` 会让每个租户各调用一次，用于验证 Token 与 HTTP 链路；它不构成性能测试。
+`prepare` 生成 `benchmarks/generated/server.json`，权限为 `600`；配置变化时会备份旧私有配置并生成新的随机 Token。它不会启动服务、创建每轮独立的数据库或执行阶段。每轮测试应使用全新目录或设置新的绝对 `database_path`，确保数据库不复用，然后手动启动服务、运行客户端并采集日志与指标。配置和结果包含 Token 与调用数据，应按敏感数据保管。默认业务端口是 `127.0.0.1:18080`，指标端口是 `127.0.0.1:19090`。
 
-`profile.json` 针对本机可用的 6 个 CPU、约 15 GiB 内存设置 48 个 Worker、4096 个全局排队位置、1000 个租户和 50000 条保留结果。它是加压起点，不代表硬件的理论最大值。默认矩阵计划 198000 次调用；其中 `tenant-volume-100k` 阶段由每个租户提交恰好 100 次工具调用，总计 100000 次。固定参数的 `baseline-fixed` 与混合参数的 `ramp-512` 相邻，均为 512 并发、8000 次调用，便于比较负载组成的影响。`tenant-skew-80-10` 假设 10% 的租户承担约 80% 的调用，用来观察热点租户对其他租户的影响。`open-arrival-150pct` 根据前面 `ramp-512` 阶段的成功完成速率，按其 1.5 倍固定速率安排调用；它验证到达率超过参考吞吐时的准入和排队行为。阶段会打印实际参与的租户数、每租户调用次数范围、成功吞吐量、端到端 p99、接收量、`429`、客户端容量丢弃量和错误数。出现非预期错误或客户端容量丢弃时停止后续阶段，并保留现场数据。
+双机测试时，应在服务端运行 `prepare`，使配置内的 Python 解释器和工具路径指向服务端文件。如果服务端没有 Go，可在相同操作系统及架构的工作站构建可执行文件，再连同 `benchmarks/config/` 和 `benchmarks/tools/` 复制到服务端的压测目录。在工作站的项目根目录构建 Linux 可执行文件：
+
+```bash
+CGO_ENABLED=1 go build -tags 'netgo sqlite_omit_load_extension' -ldflags '-linkmode external -extldflags "-static"' -o benchmarks/generated/prepare ./benchmarks/prepare
+```
+
+然后在服务端压测目录内运行 `./prepare --root .`；需要诊断工具时加 `--diagnostics`。服务端仍需 Python 3 运行工具。`--root` 指定包含 `config/` 和 `tools/` 的目录；从项目根目录直接运行时默认为 `benchmarks`。
+
+`profile.json` 设置 48 个 Worker、4096 个全局排队位置、1000 个租户和 50000 条保留结果。它是加压起点，不代表硬件的理论最大值。默认矩阵计划 198000 次调用；其中 `tenant-volume-100k` 阶段由每个租户提交恰好 100 次工具调用，总计 100000 次。固定参数的 `baseline-fixed` 与混合参数的 `ramp-512` 相邻，均为 512 并发、8000 次调用，便于比较负载组成的影响。`tenant-skew-80-10` 假设 10% 的租户承担约 80% 的调用，用来观察热点租户对其他租户的影响。`open-arrival-150pct` 应根据此前 `ramp-512` 阶段的成功完成速率，按其 1.5 倍指定客户端 `-arrival-rate`。各阶段需按 `config/stages.json` 手动运行并保存结果；出现非预期错误或客户端容量丢弃时，应停止后续阶段并保留现场数据。
+
+调整服务容量与租户数量请修改 `config/profile.json`，然后重新运行 `prepare`。租户数上限为 10000；大规模测试应复制配置到独立目录，避免覆盖默认 1000 租户基线。调整工具比例和参数请修改 `config/workload.json`；调整压力量级请修改 `config/stages.json`。普通阶段的 `concurrency` 是压测端同时进行的完整调用数：一次调用结束后，空出的并发位置才会提交下一次。固定到达率阶段按独立于完成速度的速率安排调用，`concurrency` 则是压测端允许的最大在途调用数。若在途数达到上限，请求记为 `client_capacity_drops`，没有提交给 Toolane；这种阶段不能用于判断服务端容量，应增大压测端并发上限或降低到达率后重测。引擎按租户调度工具调用，不配置 Agent 数；本压测也不发送可选的 `agent_id`。请同时查看 p99、完成吞吐量、HTTP `429`、工具失败、排队时间和指标快照，不能只看成功吞吐量。
 
 默认压测配置使用服务的 `database_synchronous=full` 持久化策略。若要评估接受操作系统崩溃或断电时最近提交可能回滚的吞吐模式，可在独立测试轮次的 `config/profile.json` 中显式加入 `"database_synchronous": "normal"`，重新生成私有配置，并使用全新数据库；两种同步策略的结果应分开报告。
-
-调整服务容量与租户数量请修改 `config/profile.json`；再次运行时脚本会备份旧的私有配置，并按新配置生成 Token。调整工具比例和参数请修改 `config/workload.json`；调整压力量级请修改 `config/stages.json`。普通阶段的 `concurrency` 是压测端同时进行的完整调用数：一次调用结束后，空出的并发位置才会提交下一次。带 `arrival_reference` 的阶段按独立于完成速度的固定速率安排调用，`concurrency` 则是压测端允许的最大在途调用数。若在途数达到上限，请求记为 `client_capacity_drops`，没有提交给 Toolane；这种阶段不能用于判断服务端容量，应增大压测端并发上限或降低到达率后重测。引擎按租户调度工具调用，不配置 Agent 数；本压测也不发送可选的 `agent_id`。请同时查看 p99、完成吞吐量、HTTP `429`、工具失败、排队时间和指标快照，不能只看成功吞吐量。
 
 这里把一个独立 Token 对应的调度主体称为一个租户。真实系统中，一个租户也可能是企业客户，而该企业的许多终端用户共享同一租户；因此压测中的 1000 租户不能直接表述成 1000 个真实终端用户。普通阶段按租户顺序均匀提交；热点阶段使用固定伪随机分布，前 10% 为热点租户，其余为低频租户。`tenant-volume-100k` 会持续运行数分钟，并产生大量服务日志；运行前请确认磁盘剩余空间。
 
@@ -63,7 +77,7 @@ python3 benchmarks/run.py
 
 ## 结果与解释
 
-每轮结果在 `benchmarks/generated/results/<运行时间>/`。`metadata.json` 记录 CPU 数、服务配置、两份负载配置、Git 修订及工作区是否有改动；`server.log` 记录服务状态转换；每阶段的 `.json` 是客户端摘要，`-before.prom` 和 `-after.prom` 是指标端口快照。
+建议将每轮结果分别保存在 `benchmarks/generated/results/<运行时间>/`，自行记录代码修订、机器资源、配置、网络路径和数据库路径。客户端通过 `-output` 保存每阶段 JSON；服务日志和阶段前后的 Prometheus 指标快照也需单独采集。
 
 | JSON 字段 | 含义 |
 | --- | --- |
@@ -77,6 +91,6 @@ python3 benchmarks/run.py
 | `submit_latency`、`end_to_end_latency` | 客户端提交延迟与完整调用延迟，含轮询间隔 |
 | `queue_latency`、`execution_time` | 服务端排队时间与运行时间 |
 
-延迟提供 p50、p95、p99，仅统计获得相应时间戳的调用。因此报告结论时必须同时列出请求总数、`429`、超时和错误。`run.py` 在同一台机器上启动服务端与压测端，两者会争用 CPU、内存和网络；本机结果体现的是同机完整系统表现。双机测试时，在 Toolane 配置中把 `business_listen` 设为服务端实际拥有的私网 IP 和端口，安全组只允许压测机访问该端口；`metrics_listen` 继续监听回环地址。在压测机上单独构建并运行本目录的 `http/` 客户端，将 `-base-url` 指向服务端私网地址，并提供私有的 `-tokens-file`、`-workload-file`、`-requests` 和 `-concurrency`。当前 `run.py` 仍用于单机矩阵，双机测试需分别启动服务端和客户端。
+延迟提供 p50、p95、p99，仅统计获得相应时间戳的调用。因此报告结论时必须同时列出请求总数、`429`、超时和错误。服务端与客户端同机运行时会争用 CPU、内存和网络，数值不能直接代表独立服务器的容量。双机测试时，可通过私网地址或经授权的 SSH 转发访问业务端口；`metrics_listen` 继续监听回环地址。在压测机上运行本目录的 `http/` 客户端，指定 `-base-url`、私有 `-tokens-file`、`-workload-file`、`-requests` 和 `-concurrency`，并分别记录两台机器的资源和网络条件。
 
 普通阶段采用闭环模式，最后的 `open-arrival-150pct` 使用固定到达率。`attempted_per_second` 按整个阶段的实际 HTTP 提交量计算，包含最后等待在途调用完成的时间；固定到达率请看 `arrival_rate_per_second`，并同时检查 `arrival_lag` 与 `client_capacity_drops`。若日后得到真实工具的耗时、输入输出大小或租户活跃度分布，应据此调整 `workload.json` 与 `stages.json` 后再报告容量结论。
